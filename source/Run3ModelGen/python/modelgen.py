@@ -182,7 +182,8 @@ class ModelGenerator:
 
         # Check logfile to check if successful
         with open(logfile, 'r') as file: loglines = file.read()
-        if not "There has been a problem during the run." in loglines.strip(): success = True
+        if "There has been a problem during the run." in loglines.strip() or "The error has occured" in loglines.strip(): success = False
+        else: success = True
         
         # Re-add input blocks needed for other tools since SPheno swallows them:
         if success: addinputblocks(infile=outfile, blocksfile=self.rawfilen)
