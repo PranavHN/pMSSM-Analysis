@@ -5,7 +5,7 @@ import numpy as np
 def addinputblocks(infile: str, blocksfile: str) -> None:
     '''Function for adding input blocks defined in blocksfile to infile. Needed since SPheno scraps unrecognised blocks from files while processing.'''
 
-    filedict = pyslha.read(infile, ignorenomass=True)
+    filedict = pyslha.read(infile, ignorenomass=True, ignoreblocks=['SPINFO'])
     blocksdict = pyslha.read(blocksfile, ignorenomass=True)
 
     blocksdict.blocks["SOFTSUSY"][28] = filedict.blocks["MASS"][25] #mh(pole)

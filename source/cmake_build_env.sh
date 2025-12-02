@@ -45,7 +45,6 @@ trap - ERR
 
 # Manipulating env vars: PATH, PYTHONPATH and DATAPATH
 echo 'export PATH="'${source_dir}'/Run3ModelGen/scripts:$PATH"' >> $build_dir/setup.sh
-echo 'export PATH="'${build_dir}'/SPheno-4.0.5beta/bin:$PATH"' >> $build_dir/setup.sh
 echo 'export PATH="'${build_dir}'/softsusy-4.1.11/src/softsusy-build:$PATH"' >> $build_dir/setup.sh
 echo 'export PATH="'${build_dir}'/micromegas_5.2.1/micromegas_5.2.1/MSSM:$PATH"' >> $build_dir/setup.sh
 echo 'export PATH="'${build_dir}'/superiso_v4.0/src/superiso:$PATH"' >> $build_dir/setup.sh
