@@ -19,9 +19,9 @@ cd run
 
 # run local model generation with config_file file if supplied
 if [ $config_file == "None" ]; then
-    pixi run genModels.py --scan_dir $_CONDOR_SCRATCH_DIR/scan.$ClusterId.$ProcId --seed $ClusterId$ProcId
+    pixi run genModels.py --scan_dir $_CONDOR_SCRATCH_DIR/scan.$ClusterId.$ProcId --seed ${ClusterId:6}$ProcId
 else
-    pixi run genModels.py --scan_dir $_CONDOR_SCRATCH_DIR/scan.$ClusterId.$ProcId --seed $ClusterId$ProcId --config_file $config_file
+    pixi run genModels.py --scan_dir $_CONDOR_SCRATCH_DIR/scan.$ClusterId.$ProcId --seed ${ClusterId:6}$ProcId --config_file $config_file
 fi
 
 # move back to condor dir
