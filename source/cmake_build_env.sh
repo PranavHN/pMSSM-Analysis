@@ -49,6 +49,7 @@ echo 'export PATH="'${build_dir}'/softsusy-4.1.11/src/softsusy-build:$PATH"' >> 
 echo 'export PATH="'${build_dir}'/micromegas_5.2.1/micromegas_5.2.1/MSSM:$PATH"' >> $build_dir/setup.sh
 echo 'export PATH="'${build_dir}'/superiso_v4.0/src/superiso:$PATH"' >> $build_dir/setup.sh
 echo 'export PATH="'${build_dir}'/GM2Calc-2.0.0/src/gm2calc-build/bin/:$PATH"' >> $build_dir/setup.sh
+echo 'export PATH="'${build_dir}'/FeynHiggs-2.19.0/src/feynhiggs-build/x86_64-Linux/bin:$PATH"' >> $build_dir/setup.sh
 echo 'export PATH="'${build_dir}'/EVADE-0.2.0/src/evade-build/:$PATH"' >> $build_dir/setup.sh
 echo 'export PYTHONPATH="'${build_dir}':$PYTHONPATH"' >> $build_dir/setup.sh
 echo 'export DATAPATH="'${source_dir}/Run3ModelGen/data':$DATAPATH"' >> $build_dir/setup.sh

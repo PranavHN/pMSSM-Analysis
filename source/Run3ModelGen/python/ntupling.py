@@ -850,6 +850,8 @@ def mkntuple(steps: dict, scan_dir: str, num_models: int, isGMSB: bool) -> None:
             inputDefinitions += [ (f"{step['output_dir']}/", ".flha", f"{step['prefix']}", superiso_blocks, {}, False), ]
         elif "gm2calc" in step['name']:
             inputDefinitions += [ (f"{step['output_dir']}/", ".slha", f"{step['prefix']}", gm2calc_blocks, {}, False), ]
+        elif "feynhiggs" in step['name']:
+            inputDefinitions += [ (f"{step['output_dir']}/", ".slha", f"{step['prefix']}", feynhiggs_blocks, {}, False), ]
         elif "evade" in step['name']:
             inputDefinitions += [ (f"{step['output_dir']}/", ".tsv", f"{step['prefix']}", None, None, None) ]
         else:

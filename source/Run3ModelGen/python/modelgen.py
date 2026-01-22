@@ -234,15 +234,64 @@ class ModelGenerator:
     
     # def run_feynhiggs(self, modelnum: int, **kwargs) -> bool:
     #     '''Run FeynHiggs and return True if successful.'''
-        
+
     #     infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
     #     outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
     #     logfile = f"{self.scan_dir}/{kwargs['log_dir']}/{modelnum}.log"
-        
-    #     # Run superiso and pipe humanly readable output into null
-    #     os.system(f"slha.x {infile} {outfile} > {logfile}")
-        
-    #     return None # NEEDS FIXING
+    #     success = False
+
+    #     # Run FeynHiggs - it writes output to stdout which we capture in outfile
+    #     retcode = os.system(f"FeynHiggs {infile} > {outfile} 2> {logfile}")
+    #     if retcode == 0: success = True
+
+    #     return success
+    def run_feynhiggs(self, modelnum: int, **kwargs) -> bool:
+        '''Run FeynHiggs and return True if successful. Re-add input blocks to output file if successful.'''
+
+        infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
+        outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
+        logfile = f"{self.scan_dir}/{kwargs['log_dir']}/{modelnum}.log"
+        success = False
+
+        # Run FeynHiggs with default flags (42423120 = full MSSM, 2-loop, recommended settings)
+        # FeynHiggs creates output file with .fh-001 extension automatically
+        retcode = os.system(f"FeynHiggs {infile} 42423120 &> {logfile}")
+
+        # Check return code first (simple success indicator)
+        if retcode != 0:
+            return False
+
+        # FeynHiggs writes output to inputfile.fh-001
+        fh_output = f"{infile}.fh-001"
+        if not os.path.exists(fh_output):
+            return False
+
+        # Parse logfile for error indicators
+        with open(logfile, 'r') as file:
+            loglines = file.read()
+
+        # Check for common FeynHiggs error patterns
+        error_patterns = [
+            "ERROR",
+            "FAILED",
+            "Segmentation fault",
+            "invalid",
+            "cannot",
+            "Error on line"
+        ]
+
+        if any(pattern in loglines for pattern in error_patterns):
+            success = False
+        else:
+            success = True
+
+        # Move FeynHiggs output to the expected location
+        if success:
+            os.system(f"mv {fh_output} {outfile}")
+            # Re-add input blocks that FeynHiggs might remove (like SPheno does)
+            addinputblocks(infile=outfile, blocksfile=self.rawfilen)
+
+        return success
     
     def run_gm2calc(self, modelnum: int, **kwargs) -> bool:
         '''Run GM2Calc and return True if successful.'''

@@ -46,6 +46,11 @@ steps:
     input_dir: SPheno
     output_dir: gm2calc
     prefix: GM2
+  - name: feynhiggs
+    input_dir: SPheno
+    output_dir: feynhiggs
+    log_dir: feynhiggs_log
+    prefix: FH
   # - name: evade
   #   input_dir: SPheno
   #   output_dir: evade
