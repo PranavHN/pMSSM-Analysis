@@ -37,16 +37,48 @@ ExternalProject_Add( superiso
     BUILD_IN_SOURCE 1
 )
 
-# # Add FeynHiggs as ExternalProject
-# ExternalProject_Add( feyngiggs
-#     PREFIX FeynHiggs-2.19.0
-#     URL https://wwwth.mpp.mpg.de/members/heinemey/feynhiggs/newversion/FeynHiggs-2.19.0.tar.gz
-#     DOWNLOAD_EXTRACT_TIMESTAMP NEW
-#     UPDATE_COMMAND ""
-#     CONFIGURE_COMMAND <SOURCE_DIR>/configure
-#     BUILD_COMMAND ${CMAKE_COMMAND} -E env "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}" ${CMAKE_MAKE_PROGRAM} CFLAGS="-z noexecstack"
-#     INSTALL_COMMAND ${CMAKE_COMMAND} -E env "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}" ${CMAKE_MAKE_PROGRAM} install
-# )
+# Add FeynHiggs as ExternalProject
+# Use pixi compilers from conda-forge with minimal flags to avoid segfaults
+ExternalProject_Add( feynhiggs
+    PREFIX FeynHiggs-2.19.0
+    URL https://wwwth.mpp.mpg.de/members/heinemey/feynhiggs/newversion/FeynHiggs-2.19.0.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP NEW
+    UPDATE_COMMAND ""
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env
+        --unset=CFLAGS
+        --unset=CXXFLAGS
+        --unset=CPPFLAGS
+        --unset=FFLAGS
+        --unset=LDFLAGS
+        --unset=DEBUG_CFLAGS
+        --unset=DEBUG_CXXFLAGS
+        --unset=DEBUG_CPPFLAGS
+        "CFLAGS=-O2"
+        "CXXFLAGS=-O2"
+        <SOURCE_DIR>/configure
+    BUILD_COMMAND ${CMAKE_COMMAND} -E env
+        --unset=CFLAGS
+        --unset=CXXFLAGS
+        --unset=CPPFLAGS
+        --unset=FFLAGS
+        --unset=LDFLAGS
+        --unset=DEBUG_CFLAGS
+        --unset=DEBUG_CXXFLAGS
+        --unset=DEBUG_CPPFLAGS
+        "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+        ${CMAKE_MAKE_PROGRAM}
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E env
+        --unset=CFLAGS
+        --unset=CXXFLAGS
+        --unset=CPPFLAGS
+        --unset=FFLAGS
+        --unset=LDFLAGS
+        --unset=DEBUG_CFLAGS
+        --unset=DEBUG_CXXFLAGS
+        --unset=DEBUG_CPPFLAGS
+        "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+        ${CMAKE_MAKE_PROGRAM} install
+)
 
 # Add GM2Calc as ExternalProject
 ExternalProject_Add( gm2calc
@@ -58,7 +90,7 @@ ExternalProject_Add( gm2calc
     INSTALL_COMMAND ""
 )
 
-# # Add EVADE as ExternalProject
+# # Add EVADE as ExternalProject - DISABLED; PROBABLY PERMANENTLY BROKEN!
 # ExternalProject_Add( evade
 #     PREFIX EVADE-0.2.0
 #     GIT_REPOSITORY https://gitlab.com/jonaswittbrodt/EVADE.git
