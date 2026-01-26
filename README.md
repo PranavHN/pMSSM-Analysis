@@ -23,7 +23,9 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
   - [Adding software/updating the software version](#adding-softwareupdating-the-software-version)
   - [Fixing the parameter points](#fixing-the-parameter-points)
   - [Gaps in the scan ranges](#gaps-in-the-scan-ranges)
+  - [cmake_build_env.sh](#cmake_build_envsh)
   - [pixi](#pixi-1)
+  
 
 # Targets
 - [x] Move from shell scripts to Makefile structure for building
