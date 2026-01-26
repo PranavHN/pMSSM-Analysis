@@ -43,8 +43,8 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 | - | - | - | - | - |
 | SPheno | 4.0.5beta | &#x2705; | 4.0.5 | &#x274c; |
 | Softsusy | 4.1.11 | &#x2705; | 4.1.13 | &#x274c; |
-| FeynHiggs | 2.19.0 | &#x274c; | 2.19.0 | &#x274c; |
-| SuperIso | 4.0 | &#x2705; | 4.1 7 | &#x274c; |
+| FeynHiggs | 2.19.0 | &#x2705; | 2.19.0 | &#x2705; |
+| SuperIso | 4.0 | &#x2705; | 5.0 | &#x274c; |
 | GM2Calc | 2.0.0 | &#x2705; | 2.2.0 | &#x274c; |
 | micrOMEGAs | 5.2.1 | &#x2705; | 6.0 | &#x274c; |
 | EVADE | 0.2.0 | &#x274c; | 0.2.0 | &#x274c; |
@@ -262,6 +262,30 @@ parameters:
   M_1: [-2000, 2000]
   M_2: [[-3000, -1000], [-1000, 800], [1000, 3000]]
 ...
+```
+
+## cmake_build_env.sh
+
+The [cmake_build_env.sh](source/cmake_build_env.sh) script is automatically called during the CMake build process and sets up the build environment. You typically don't need to run this script manually.
+
+**What it does:**
+- Creates the necessary build directory structure
+- Sets up symbolic links for Python modules from `source/Run3ModelGen/python/` to `build/Run3ModelGen/`
+- Creates the EOS output directory at `/eos/user/<initial>/<username>/Run3ModelGen`
+- Generates the `build/setup.sh` file with all necessary environment variables:
+  - `PATH`: Adds all external software binaries (SPheno, softsusy, micromegas, etc.) and Run3ModelGen scripts
+  - `PYTHONPATH`: Adds the build directory for Python module imports
+  - `DATAPATH`: Points to the Run3ModelGen data directory
+  - `EOSPATH`: Points to your EOS output directory
+  - `RUN3MODELGENDIR`: Points to the repository root directory
+
+**When it's called:**
+This script is executed automatically by CMake during the build process (`cmake --build build -j8`). The `-s` (source) and `-b` (build) directory arguments are provided by the CMake configuration.
+
+**Manual usage (advanced):**
+If you need to run it manually for debugging purposes:
+```bash
+source/cmake_build_env.sh -s source -b build
 ```
 
 ## pixi
