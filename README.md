@@ -41,17 +41,15 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 
 ## Software content
 
-| Software | Implemented Version | Latest Version | 
-| - | - | - | 
-| SPheno | 4.0.6 | 4.0.6 | 
-| Softsusy | 4.1.22 | 4.1.22 | 
-| FeynHiggs | 2.19.0 | 2.19.0 | 
-| SuperIso | 4.0 | 5.0 | 
-| GM2Calc | 2.0.0 | 2.2.0 |
-| micrOMEGAs | 5.2.1 | 6.0 | 
-| EVADE | - | 0.2.0 | 
-
-EVADE broke after a recent update to HOM4PS and will remain unavailable for the time being.
+| Software | Implemented Version | Notes |
+| - | - | - |
+| SPheno | 4.0.6 | SUSY spectrum generator with precise mass calculations |
+| Softsusy | 4.1.22 | Alternative SUSY spectrum generator for cross-checks |
+| FeynHiggs | 2.19.0 | Precise Higgs mass calculation with higher-order corrections |
+| SuperIso | 5.0 | Flavor physics observables (B-physics, rare decays) |
+| GM2Calc | 2.3.1 | Muon anomalous magnetic moment (g-2) calculation |
+| micrOMEGAs | 5.2.1 | Dark matter relic density and direct/indirect detection. Upgrading to version 6.3.0 requires re-generating patch files. See: https://gitlab.cern.ch/jwuerzin/Run3ModelGen/-/issues/15 |
+| EVADE | - | Direct detection constraints (currently unavailable). Version 0.2.0 broke after a recent update to HOM4PS and will remain unavailable for the time being. |
 
 ## Functionalities
 
