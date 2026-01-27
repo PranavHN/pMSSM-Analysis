@@ -3,8 +3,6 @@ environments:
   default:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
-    options:
-      pypi-prerelease-mode: if-necessary-or-explicit
     packages:
       linux-64:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/_libgcc_mutex-0.1-conda_forge.tar.bz2
@@ -86,6 +84,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/openssl-3.6.0-h26f9b46_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-25.0-pyh29332c3_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-2.2.3-py311h7db5c69_3.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/patch-2.8-hb03c661_1002.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pcre2-10.44-hc749103_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/perl-5.32.1-7_hd590300_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pygments-2.19.2-pyhd8ed1ab_0.conda
@@ -203,6 +202,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-64/openssl-3.6.0-h230baf5_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-25.0-pyh29332c3_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-64/pandas-2.2.3-py311hcf53e2f_3.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-64/patch-2.8-h8616949_1002.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-64/pcre2-10.44-hf733adb_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-64/perl-5.32.1-7_h10d778d_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pygments-2.19.2-pyhd8ed1ab_0.conda
@@ -322,6 +322,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/openssl-3.6.0-h5503f6c_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-25.0-pyh29332c3_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-2.2.3-py311hca32420_3.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/patch-2.8-hc919400_1002.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pcre2-10.44-ha881caa_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/perl-5.32.1-7_h4614cfb_perl5.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pygments-2.19.2-pyhd8ed1ab_0.conda
@@ -3093,6 +3094,34 @@ packages:
   license_family: BSD
   size: 14820281
   timestamp: 1744430962289
+- conda: https://conda.anaconda.org/conda-forge/linux-64/patch-2.8-hb03c661_1002.conda
+  sha256: 61d3a3ef79952014bf536ffd84828d3558fc58b332adb89ed198b77fb301c2c5
+  md5: eaa73c6e5aff5b28675147abc350d49a
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=14
+  license: GPL-3.0-or-later
+  license_family: GPL
+  size: 117222
+  timestamp: 1757600683480
+- conda: https://conda.anaconda.org/conda-forge/osx-64/patch-2.8-h8616949_1002.conda
+  sha256: a87e0dce4dc69c89236e81372ea95d0cbfa59be91ea6db71a6d29eed6234ee59
+  md5: 7af6fee13f52d889efa8534a1af4cd27
+  depends:
+  - __osx >=10.13
+  license: GPL-3.0-or-later
+  license_family: GPL
+  size: 126962
+  timestamp: 1757601265407
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/patch-2.8-hc919400_1002.conda
+  sha256: e2a9ce71938e82ba3adbdafb32dc30efb7cbba5b18a3c45febf3fb32538d0bd1
+  md5: cd098e0e28c80d9db6ab5b7128bcfb82
+  depends:
+  - __osx >=11.0
+  license: GPL-3.0-or-later
+  license_family: GPL
+  size: 123437
+  timestamp: 1757601093674
 - conda: https://conda.anaconda.org/conda-forge/linux-64/pcre2-10.44-hc749103_2.conda
   sha256: 09717569649d89caafbf32f6cda1e65aef86e5a86c053d30e4ce77fca8d27b68
   md5: 31614c73d7b103ef76faa4d83d261d34

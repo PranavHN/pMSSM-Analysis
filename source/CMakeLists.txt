@@ -8,8 +8,13 @@ project( Run3ModelGen )
 
 include( ExternalProject )
 
-# Add subdirectories for tools that need tweaking
-add_subdirectory( micromegas_5.2.1 )
+# Configure micromegas patches with absolute pixi path
+set(PIXI_LIB_PATH "${CMAKE_SOURCE_DIR}/.pixi/envs/default/lib")
+configure_file(
+    ${CMAKE_SOURCE_DIR}/patches/micromegas/001-calchep-compiler-flags.patch.in
+    ${CMAKE_BINARY_DIR}/patches/001-calchep-compiler-flags.patch
+    @ONLY
+)
 
 # Add ExternalProjects for tools that run out-of-the-box
 
@@ -87,6 +92,31 @@ ExternalProject_Add( gm2calc
     DOWNLOAD_EXTRACT_TIMESTAMP NEW
     UPDATE_COMMAND ""
     BUILD_COMMAND ${CMAKE_COMMAND} -E env "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}" ${CMAKE_MAKE_PROGRAM}
+    INSTALL_COMMAND ""
+)
+
+# Add micromegas as ExternalProject
+ExternalProject_Add( micromegas
+    PREFIX micromegas_5.2.1
+    URL https://lapth.cnrs.fr/micromegas/downloadarea/code/micromegas_5.2.1.tgz
+    DOWNLOAD_EXTRACT_TIMESTAMP NEW
+    UPDATE_COMMAND ""
+
+    # Apply patches
+    PATCH_COMMAND
+        patch -p1 < ${CMAKE_BINARY_DIR}/patches/001-calchep-compiler-flags.patch &&
+        patch -p1 < ${CMAKE_SOURCE_DIR}/patches/micromegas/002-mssm-disable-features.patch &&
+        patch -p1 < ${CMAKE_SOURCE_DIR}/patches/micromegas/003-mssm-tabular-output.patch
+
+    # Create empty directories (needed by micromegas to build)
+    CONFIGURE_COMMAND ""
+
+    # Build micromegas base first, then MSSM
+    BUILD_COMMAND
+        ${CMAKE_MAKE_PROGRAM} -C <SOURCE_DIR> -j1
+        COMMAND ${CMAKE_MAKE_PROGRAM} -C <SOURCE_DIR>/MSSM -j1
+
+    BUILD_IN_SOURCE 1
     INSTALL_COMMAND ""
 )
 
