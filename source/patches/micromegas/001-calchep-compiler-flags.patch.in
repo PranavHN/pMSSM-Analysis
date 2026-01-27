@@ -1,0 +1,22 @@
+--- a/CalcHEP_src/getFlags
++++ b/CalcHEP_src/getFlags
+@@ -47,7 +47,8 @@
+              CXXFLAGS="-g -fPIC"
+              unKnownC=
+           else 
+-            CFLAGS="-g -std=gnu99 -fPIC"
++            # CFLAGS="-g -std=gnu99 -fPIC"
++            CFLAGS="-g -std=gnu99 -fPIC -fcommon -L@PIXI_LIB_PATH@ -lgfortran -lquadmath"
+             CXX=$CC
+             CXXFLAGS="-g -fPIC"
+             echo Unknown compiler $CC  
+@@ -63,7 +64,8 @@
+        CXX=g++
+        echo   CC=gcc by default
+     fi
+-    CFLAGS="-g -fsigned-char -std=gnu99 -fPIC"
++    # CFLAGS="-g -fsigned-char -std=gnu99 -fPIC"
++    CFLAGS="-g -fsigned-char -std=gnu99 -fPIC -fcommon -L@PIXI_LIB_PATH@ -lgfortran -lquadmath"
+     CXXFLAGS="-g -fPIC"
+     unKnownC=
+   fi
