@@ -41,15 +41,15 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 
 ## Software content
 
-| Software | Run 2 Version | Implemented | Latest Version | Implemented |
-| - | - | - | - | - |
-| SPheno | 4.0.5beta | &#x2705; | 4.0.5 | &#x274c; |
-| Softsusy | 4.1.11 | &#x2705; | 4.1.13 | &#x274c; |
-| FeynHiggs | 2.19.0 | &#x2705; | 2.19.0 | &#x2705; |
-| SuperIso | 4.0 | &#x2705; | 5.0 | &#x274c; |
-| GM2Calc | 2.0.0 | &#x2705; | 2.2.0 | &#x274c; |
-| micrOMEGAs | 5.2.1 | &#x2705; | 6.0 | &#x274c; |
-| EVADE | 0.2.0 | &#x274c; | 0.2.0 | &#x274c; |
+| Software | Implemented Version | Latest Version | 
+| - | - | - | 
+| SPheno | 4.0.6 | 4.0.6 | 
+| Softsusy | 4.1.22 | 4.1.22 | 
+| FeynHiggs | 2.19.0 | 2.19.0 | 
+| SuperIso | 4.0 | 5.0 | 
+| GM2Calc | 2.0.0 | 2.2.0 |
+| micrOMEGAs | 5.2.1 | 6.0 | 
+| EVADE | - | 0.2.0 | 
 
 EVADE broke after a recent update to HOM4PS and will remain unavailable for the time being.
 
