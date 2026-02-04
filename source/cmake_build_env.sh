@@ -55,3 +55,9 @@ echo 'export PYTHONPATH="'${build_dir}':$PYTHONPATH"' >> $build_dir/setup.sh
 echo 'export DATAPATH="'${source_dir}/Run3ModelGen/data':$DATAPATH"' >> $build_dir/setup.sh
 echo 'export EOSPATH="/eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen"' >> $build_dir/setup.sh
 echo 'export RUN3MODELGENDIR="'${source_dir%source}'"' >> $build_dir/setup.sh
+echo '# Check if eos directory is available & set SMODELS_CACHEDIR accordingly' >> $build_dir/setup.sh
+echo 'if [ -d /eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen ]; then' >> $build_dir/setup.sh
+echo '  export SMODELS_CACHEDIR="/eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen"' >> $build_dir/setup.sh
+echo 'else' >> $build_dir/setup.sh >> $build_dir/setup.sh
+echo '  export SMODELS_CACHEDIR="'${source_dir%source}'"' >> $build_dir/setup.sh
+echo 'fi' >> $build_dir/setup.sh >> $build_dir/setup.sh

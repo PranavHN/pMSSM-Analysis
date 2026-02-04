@@ -792,7 +792,6 @@ def readModel(inputDefinitions: list[tuple], num: int, scanDir: str, outName: st
     data={}
     #data['model']=num
     data['model']=int(outName.split('.')[-2]+'00000')+num
-
     # Loop over inputDefinitions:
     for inputDef in inputDefinitions:
         (directory, filetype, prefix, blocks, decays, needsMass) = inputDef
@@ -806,7 +805,7 @@ def readModel(inputDefinitions: list[tuple], num: int, scanDir: str, outName: st
                 readSLHA(fileName, data, prefix, blocks, decays, needsMass, isGMSB)
             except:
                 pass
-        else: 
+        elif filetype == '.csv' or filetype == '.tsv': 
             myData=csvReader.read(fileName)
             for col in myData:
                 for row in myData[col]:
@@ -819,6 +818,25 @@ def readModel(inputDefinitions: list[tuple], num: int, scanDir: str, outName: st
                             data[prefix+row.replace(':','_').replace("-","_")]=val
                     except ValueError:
                         pass
+        elif filetype == '.slha.py':
+            # read smodels output and save in smodels_dict:
+            smodels_dict = {}
+            with open(fileName, 'r') as f:
+                exec(f.read(), smodels_dict)
+            
+            # save theory prediction & (exp) UL:
+            try:
+                for res in smodels_dict['smodelsOutput']['ExptRes']:
+                    AnalysisID = res['AnalysisID'].replace("-", "_")
+
+                    data[f"{prefix}{AnalysisID}_TheoryPrediction"] = res['theory prediction (fb)']
+                    data[f"{prefix}{AnalysisID}_UpperLimit"] = res['upper limit (fb)']
+                    data[f"{prefix}{AnalysisID}_ExpUpperLimit"] = res['expected upper limit (fb)']
+            except: pass
+            
+        else:
+            log.fatal(f"filetype {filetype} not recognised!")
+        
     return data
 
 def mkntuple(steps: dict, scan_dir: str, num_models: int, isGMSB: bool) -> None:
@@ -854,6 +872,9 @@ def mkntuple(steps: dict, scan_dir: str, num_models: int, isGMSB: bool) -> None:
             inputDefinitions += [ (f"{step['output_dir']}/", ".slha", f"{step['prefix']}", feynhiggs_blocks, {}, False), ]
         elif "evade" in step['name']:
             inputDefinitions += [ (f"{step['output_dir']}/", ".tsv", f"{step['prefix']}", None, None, None) ]
+        elif "SModelS" in step['name']:
+            # log.warning("SModelS not supported in NTupling yet!")
+            inputDefinitions += [ (f"{step['output_dir']}/", ".slha.py", f"{step['prefix']}", None, None, None) ]
         else:
             raise KeyError(f"Step name {step['name']} not recognised!")
     

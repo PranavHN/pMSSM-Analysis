@@ -4,7 +4,8 @@ version = "0.4.0"
 description = "Modern pMSSM Model Generation Framework"
 authors = ["Jonas Wuerzinger <jonas.wuerzinger@gmail.com>"]
 channels = ["conda-forge"]
-platforms = ["linux-64", "osx-64", "osx-arm64"]
+# platforms = ["linux-64", "osx-64", "osx-arm64"]
+platforms = ["linux-64"]
 
 [tasks]
 
@@ -52,7 +53,6 @@ cmake \
 python = "3.11.*"
 gfortran = ">=13.2.0,<13.3"
 cmake = ">=3.29.2,<3.30"
-numpy = ">=1.26.4,<1.27"
 pyyaml = ">=6.0.1,<6.1"
 make = ">=4.3,<5"
 which = ">=2.21,<3"
@@ -69,6 +69,9 @@ pyslha = ">=3.3.0,<4"
 spheno-atlas = ">=4.0.6,<5"
 colorama = ">=0.4.6,<0.5"
 patch = ">=2.8,<3"
+ipykernel = ">=7.1.0,<7.2"
+smodels = ">=3.1.1"
+scipy = ">=1.15,<=1.16"
 
 [target.linux-64.dependencies]
 gcc = ">=13.2.0,<13.3"

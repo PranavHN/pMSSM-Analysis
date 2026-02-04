@@ -17,6 +17,12 @@ import logging
 log = structlog.get_logger()
 structlog.stdlib.recreate_defaults(log_level=logging.INFO)  # so we have logger names
 
+# Bridge handler: this forwards standard log records → structlog
+class StructlogHandler(logging.Handler):
+    def emit(self, record):
+        # Convert logging.LogRecord → structlog event
+        log.bind(module=record.name).info(record.getMessage())
+
 class ModelGenerator:
     '''Class for Model Generation.'''
     def __init__(self, config_file: str = None, scan_dir: str = f"scan", seed: int = 123) -> None:
@@ -182,7 +188,7 @@ class ModelGenerator:
 
         # Check logfile to check if successful
         with open(logfile, 'r') as file: loglines = file.read()
-        if "There has been a problem during the run." in loglines.strip() or "The error has occured" in loglines.strip(): success = False
+        if "There has been a problem during the run." in loglines.strip() or "The error occured" in loglines.strip(): success = False
         else: success = True
         
         # Re-add input blocks needed for other tools since SPheno swallows them:
@@ -322,6 +328,80 @@ class ModelGenerator:
         retcode = os.system(f"EVADE_MSSM {evade_conffile} &>/dev/null")
         if retcode == 0: success = True
         
+        return success
+    
+    def run_SModelS(self, modelnum: int, **kwargs) -> bool:
+        '''Run SModelS and return True if successful.'''
+        
+        # Replace handlers of the library
+        lib_logger = logging.getLogger("smodels")
+        lib_logger.handlers = [StructlogHandler()]
+        lib_logger.propagate = False
+        lib_logger.setLevel(logging.INFO)
+        
+        infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
+        outputDir = f"{self.scan_dir}/{kwargs['output_dir']}/"
+        smodels_config = f"{datadir}/SModelS_parameters.ini"
+        success = False
+        
+        # Import those parts of smodels that are needed for this exercise
+        from smodels.matching import modelTester
+        from smodels.base import runtime
+        from smodels.tools import particlesLoader
+        from importlib import reload
+        
+        # Import those parts of smodels that are needed for this exercise
+        from smodels.tools import xsecComputer
+        from smodels.base.physicsUnits import TeV, fb
+        from smodels.installation import installDirectory
+        from smodels.tools.xsecComputer import LO, NLL
+        # logging.getLogger("smodels").setLevel(logging.CRITICAL) # TODO: Need to find a way to clean up SModelS printout
+        
+        # Lets compute the NLL cross-sections for 13 TeV. The xsecComputer will first use Pythia to compute
+        # the LO cross-sections and then NLLfast to compute the k-factors.
+        # The output will contain only the processes contained in NLLfast (gluino and squark production)
+        # For the Pythia step we have to define the number of MC events (1k)
+        # (To see how to also include LO cross-sections for all processes check the LO HowTo)
+        computer = xsecComputer.XSecComputer ( maxOrder=NLL, nevents = 10_000, pythiaVersion=8 )
+        
+        # Try computing xsecsNLL, will fail for missing inputs
+        try:
+            xsecsNLL=computer.compute(sqrts = 13*TeV, slhafile=infile )
+        except:
+            success = False
+            return success
+        
+        # If all relevant xsecs are 0, computer.compute() will return an empty list. Set SModelS to fail in this case:
+        if xsecsNLL == []:
+            success = False
+            return success
+        
+        # Finally, lets write the cross-sections back to the file 
+        # (will write only the cross-sections not overlapping the existing ones):
+        computer.addXSecToFile(xsecsNLL,infile)
+        
+        #Read and check parameter file, exit parameterFile does not exist
+        parser = modelTester.getParameters(smodels_config)
+        
+        #Change option:
+        # parser.set('printer','outputtype','summary')
+        parser.set('printer','outputtype','python')
+        
+        #Determine particles module from ini file, if necessary """
+        if parser.has_option("particles","model"):
+            runtime.modelFile = parser.get( "particles", "model" )
+            reload(particlesLoader)
+
+        #Load the database defined in the parameters file, exit if not found """
+        database = modelTester.loadDatabase(parser,db=None)
+        
+        #run SModelS with input file:
+        output = modelTester.testPoint(infile, outputDir, parser, database)
+        
+        # As we're not exiting the program, let's make sure all output is flushed
+        [ x.flush() for x in output.values() ]
+        
+        success = True
         return success
     
     def generate_models(self) -> None:
