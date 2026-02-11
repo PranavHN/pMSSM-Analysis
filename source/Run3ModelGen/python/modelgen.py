@@ -186,11 +186,15 @@ class ModelGenerator:
         # run SPheno
         os.system(f"SPheno {infile} {outfile} &> {logfile}")
 
-        # Check logfile to check if successful
-        with open(logfile, 'r') as file: loglines = file.read()
-        if "There has been a problem during the run." in loglines.strip() or "The error occured" in loglines.strip(): success = False
-        else: success = True
-        
+        # Check that output file was actually produced
+        if not os.path.exists(outfile):
+            success = False
+        else:
+            # Check logfile for known error messages
+            with open(logfile, 'r') as file: loglines = file.read()
+            if "There has been a problem during the run." in loglines.strip() or "The error has occured" in loglines.strip(): success = False
+            else: success = True
+
         # Re-add input blocks needed for other tools since SPheno swallows them:
         if success: addinputblocks(infile=outfile, blocksfile=self.rawfilen)
         
@@ -437,13 +441,18 @@ class ModelGenerator:
         
         for mod in range(self.num_models):
             log.info(f"Generating Model: {mod}.slha ({mod+1}/{self.num_models})")
-            
+
+            model_ok = True
             for step in self.steps:
+                if not model_ok:
+                    log.info(f"\tskipping step: {step['name']} (previous step failed)")
+                    continue
                 log.info(f"\trunning step: {step['name']}")
                 success = self.run_step(modelnum=mod, **step)
-                
+
                 # Keep track of successes
                 if success: succcounts[step['name']] += 1
+                else: model_ok = False
          
         # Dump scan config in scan_dir
         with open(f"{self.scan_dir}/scan_config.yaml", "w") as file:
