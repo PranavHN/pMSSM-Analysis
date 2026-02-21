@@ -68,7 +68,7 @@ class CondorHandler:
                 log.info(f"Saved config file in {self.condor_dir}/{self.config_file}.")
                 confstr = f"{os.getcwd()}/{self.condor_dir}/{self.config_file}"
             else:
-                os.system(f"cp {datadir}/default_config.yaml {self.condor_dir}/")
+                os.system(f"cp {datadir}/configs/default_config.yaml {self.condor_dir}/")
                 log.info(f"Saved config file in {self.condor_dir}/default_config.yaml.")
                 confstr = "None"
             

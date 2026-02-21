@@ -2,15 +2,41 @@ stages:
   - build
   - genModels
   - extractModels
+  - publish
 
 variables:
   GIT_SUBMODULE_STRATEGY: recursive
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
 
 .install_pixi:
   before_script:
     # fetch and install pixi locally
     - curl -fsSL https://pixi.sh/install.sh | bash
     - . ~/.bash_profile
+
+# Local template: activates pixi environment + sources build/setup.sh
+# so that all subsequent script commands run with the full environment.
+.setup_local:
+  image: gitlab-registry.cern.ch/linuxsupport/alma9-base
+  before_script:
+    - curl -fsSL https://pixi.sh/install.sh | bash
+    - . ~/.bash_profile
+    - eval "$(pixi shell-hook)"
+    - source build/setup.sh
+    - mkdir -p run
+
+# Docker template: sources ~/.bashrc (which includes pixi + setup.sh)
+.setup_docker:
+  before_script:
+    - . ~/.bashrc
+    - mkdir -p run
+
+# ---------------------------------------------------------------------------
+# Build stage
+# ---------------------------------------------------------------------------
 
 build_local:
   extends: .install_pixi
@@ -30,6 +56,8 @@ build_local:
     paths:
       - build/
 
+# Builds and pushes to a temporary CI tag for testing.
+# The final tag is applied by publish_docker after all tests pass.
 build_docker:
   stage: build
   image:
@@ -38,91 +66,168 @@ build_docker:
   script:
     # Prepare Kaniko configuration file
     - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
-    # Build and push the image
-    - |
-      # If pipeline runs on the default branch (main): Set tag to "latest"
-      if test "$CI_COMMIT_BRANCH" == "$CI_DEFAULT_BRANCH"; then
-        add=""
-        tag="latest"
-      # If pipeline is a tag pipeline, set tag to the git commit tag
-      elif test -n "${CI_COMMIT_TAG}"; then
-        add=""
-        tag="${CI_COMMIT_TAG}"
-      # Else set the tag to the branch name and git commit sha
-      else
-        add="${CI_COMMIT_REF_SLUG}"
-        tag="-${CI_COMMIT_SHORT_SHA}"
-      fi
-      IMAGE_DESTINATION=${CI_REGISTRY_IMAGE}:${add}${tag}
+    # Build and push to a temporary CI-pipeline-specific tag
+    - CI_IMAGE=${CI_REGISTRY_IMAGE}:ci-${CI_PIPELINE_ID}
     - /kaniko/executor
       --context "${CI_PROJECT_DIR}"
       --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
-      --destination "${IMAGE_DESTINATION}"
-    - echo "Image pushed successfully to ${IMAGE_DESTINATION}"
-    - echo "IMAGE_DESTINATION=$IMAGE_DESTINATION" >> deploy.env
+      --destination "${CI_IMAGE}"
+    - echo "Image pushed to ${CI_IMAGE}"
+    - echo "CI_IMAGE=${CI_IMAGE}" >> deploy.env
   artifacts:
     reports:
       dotenv: deploy.env
     expire_in: 1 day
 
-genModels_local:
-  extends: .install_pixi
+# ---------------------------------------------------------------------------
+# genModels stage — flat prior
+# ---------------------------------------------------------------------------
+
+genModels_flat_local:
+  extends: .setup_local
   stage: genModels
-  dependencies:
-    - build_local
+  needs: [build_local]
   script:
-    - pixi list
-    - ls
-    - pwd
-    - pixi run genModels
+    - cd run
+    - genModels.py --scan_dir scan_flat
   artifacts:
     paths:
-      - run/scan
+      - run/scan_flat
     expire_in: 1 day
 
-genModels_docker:
+genModels_flat_docker:
+  extends: .setup_docker
   stage: genModels
-  dependencies:
-    - build_docker
-  image: ${IMAGE_DESTINATION}
+  needs: [build_docker]
+  image: ${CI_IMAGE}
   script:
-    # source bashrc so pixi and Run3ModelGen are setup
-    - . ~/.bashrc
-    # run test
-    - pixi list
-    - ls
-    - pwd
-    - mkdir run && cd run
-    - pixi run genModels.py
+    - cd run
+    - pixi run genModels.py --scan_dir scan_flat
   artifacts:
     paths:
-      - run/scan
+      - run/scan_flat
     expire_in: 1 day
+
+# ---------------------------------------------------------------------------
+# genModels stage — fixed prior
+# ---------------------------------------------------------------------------
+
+genModels_fixed_local:
+  extends: .setup_local
+  stage: genModels
+  needs: [build_local]
+  script:
+    - cd run
+    - genModels.py --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --scan_dir scan_fixed
+  artifacts:
+    paths:
+      - run/scan_fixed
+    expire_in: 1 day
+
+genModels_fixed_docker:
+  extends: .setup_docker
+  stage: genModels
+  needs: [build_docker]
+  image: ${CI_IMAGE}
+  script:
+    - cd run
+    - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --scan_dir scan_fixed
+  artifacts:
+    paths:
+      - run/scan_fixed
+    expire_in: 1 day
+
+# ---------------------------------------------------------------------------
+# genModels stage — mcmc prior
+# ---------------------------------------------------------------------------
+
+genModels_mcmc_local:
+  extends: .setup_local
+  stage: genModels
+  needs: [build_local]
+  script:
+    - cd run
+    - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml --scan_dir scan_mcmc
+  artifacts:
+    paths:
+      - run/scan_mcmc
+    expire_in: 1 day
+
+genModels_mcmc_docker:
+  extends: .setup_docker
+  stage: genModels
+  needs: [build_docker]
+  image: ${CI_IMAGE}
+  script:
+    - cd run
+    - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml --scan_dir scan_mcmc
+  artifacts:
+    paths:
+      - run/scan_mcmc
+    expire_in: 1 day
+
+# ---------------------------------------------------------------------------
+# extractModels stage — runs on the flat scan output
+# ---------------------------------------------------------------------------
 
 extractModels_local:
-  extends: .install_pixi
+  extends: .setup_local
   stage: extractModels
-  dependencies:
-    - build_local
-    - genModels_local
+  needs: [build_local, genModels_flat_local]
   script:
-    - pixi list
-    - ls
-    - pwd
-    - pixi run extractModels
+    - cd run
+    - extractModels.py --scan_dir scan_flat --root_file scan_flat/ntuple.0.0.root --selection "(akarr['SS_m_h']!=-1) & (akarr['SS_m_h'] <= 130)"
 
 extractModels_docker:
+  extends: .setup_docker
   stage: extractModels
-  dependencies:
-    - build_docker
-    - genModels_docker
-  image: ${IMAGE_DESTINATION}
+  needs: [build_docker, genModels_flat_docker]
+  image: ${CI_IMAGE}
   script:
-    # source bashrc so pixi and Run3ModelGen are setup
-    - . ~/.bashrc
-    # run test
-    - pixi list
-    - ls
-    - pwd
     - cd run
-    - pixi run extractModels.py --scan_dir scan --root_file scan/ntuple.0.0.root --selection "(akarr['SS_m_h']!=-1) & (akarr['SS_m_h'] <= 130)"
+    - pixi run extractModels.py --scan_dir scan_flat --root_file scan_flat/ntuple.0.0.root --selection "(akarr['SS_m_h']!=-1) & (akarr['SS_m_h'] <= 130)"
+
+# ---------------------------------------------------------------------------
+# Publish stage — push the final docker image tag after all tests pass
+# ---------------------------------------------------------------------------
+
+publish_docker:
+  stage: publish
+  needs:
+    - job: build_docker
+      artifacts: true
+    # Docker tests
+    - job: genModels_flat_docker
+      artifacts: false
+    - job: genModels_fixed_docker
+      artifacts: false
+    - job: genModels_mcmc_docker
+      artifacts: false
+    - job: extractModels_docker
+      artifacts: false
+    # Local tests
+    - job: genModels_flat_local
+      artifacts: false
+    - job: genModels_fixed_local
+      artifacts: false
+    - job: genModels_mcmc_local
+      artifacts: false
+    - job: extractModels_local
+      artifacts: false
+  image:
+    name: gcr.io/go-containerregistry/crane:debug
+    entrypoint: [""]
+  script:
+    - crane auth login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    # Compute the final image tag
+    - |
+      if test "$CI_COMMIT_BRANCH" == "$CI_DEFAULT_BRANCH"; then
+        FINAL_TAG="latest"
+      elif test -n "${CI_COMMIT_TAG}"; then
+        FINAL_TAG="${CI_COMMIT_TAG}"
+      else
+        FINAL_TAG="${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
+      fi
+    # Copy the tested CI image to the final tag
+    - crane cp $CI_IMAGE $CI_REGISTRY_IMAGE:$FINAL_TAG
+    - echo "Image published to $CI_REGISTRY_IMAGE:$FINAL_TAG"

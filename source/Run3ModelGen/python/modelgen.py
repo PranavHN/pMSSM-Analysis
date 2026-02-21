@@ -11,6 +11,8 @@ from Run3ModelGen.ntupling import mkntuple
 from Run3ModelGen.microextract import microextract
 from Run3ModelGen.addinputblocks import addinputblocks
 from Run3ModelGen.pMSSM_convert import convert_slha
+import Run3ModelGen.csvReader as csvReader
+import shutil
 
 import structlog
 import logging
@@ -40,7 +42,7 @@ class ModelGenerator:
         self.points = {}
         
         # Add all keys in config_file as attributes. Replace attribute by default if not provided
-        default_config = f"{datadir}/default_config.yaml"
+        default_config = f"{datadir}/configs/default_config.yaml"
         config_dict = self.read_yaml_file(self.config_file) if self.config_file is not None else {}
         
         for key, defaultval in self.read_yaml_file(default_config).items():
@@ -124,12 +126,349 @@ class ModelGenerator:
     
     def sample_fixed(self) -> None:
         '''Function for generating fixed points given by input config file.'''
-        
+
         for key, pointlist in self.parameters.items():
             self.points[key] = np.array(pointlist)
-            
+
         return None
-            
+
+    # ── MCMC sampling methods ──────────────────────────────────────────
+
+    def sample_mcmc(self) -> None:
+        '''Run Metropolis-Hastings MCMC sampling.
+
+        Unlike sample_flat(), this method also runs the pipeline for each proposal,
+        since the likelihood depends on computed observables. After completion,
+        self.points contains only accepted models and output files exist at indices
+        0 through num_models-1.
+        '''
+        proposal_widths = self._build_proposal_widths()
+        burn_in = self.mcmc.get('burn_in', 0)
+        max_attempts = self.mcmc.get('max_attempts', 100000)
+        accept_invalid = self.mcmc.get('accept_invalid', False)
+        penalty = 1e6
+
+        # Use num_models as a scratch file index, separate from any valid
+        # accepted index (0..num_models-1). This way every acceptance copies
+        # from scratch to the final index, and no accepted files get overwritten.
+        scratch_idx = self.num_models
+
+        # Initialize self.points large enough to index scratch_idx
+        # (run_prep_input reads self.points[key][modelnum])
+        for key in self.parameters:
+            self.points[key] = np.zeros(scratch_idx + 1)
+
+        # Draw random initial point within parameter bounds
+        current = self._sample_initial_point()
+        for key, val in current.items():
+            self.points[key][scratch_idx] = val
+
+        # Run pipeline on initial point at scratch index
+        current_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
+
+        accepted_points = {key: [] for key in self.parameters}
+        n_accepted = 0
+        n_total = 0
+        n_burn_accepted = 0
+        past_burn_in = (burn_in == 0)
+        if not past_burn_in:
+            log.info(f"Starting MCMC burn-in ({burn_in} accepted steps)...")
+
+        while n_accepted < self.num_models and n_total < max_attempts:
+            n_total += 1
+
+            proposed = self._propose(current, proposal_widths)
+
+            # Write proposed point into scratch arrays at scratch index
+            for key, val in proposed.items():
+                self.points[key][scratch_idx] = val
+
+            # Run pipeline at scratch index
+            proposed_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
+
+            if self._accept_proposal(current_chi2, proposed_chi2):
+                current = proposed.copy()
+                current_chi2 = proposed_chi2
+
+                # Skip saving invalid points unless accept_invalid is set
+                if not accept_invalid and current_chi2 >= penalty:
+                    continue
+
+                if past_burn_in:
+                    self._commit_accepted_model(scratch_idx, n_accepted)
+                    for key in self.parameters:
+                        accepted_points[key].append(current[key])
+                    n_accepted += 1
+                    accepted_file = f"{self.scan_dir}/input/{n_accepted - 1}.slha"
+                    log.info(f"MCMC accepted {n_accepted}/{self.num_models} "
+                             f"(attempt {n_total}, file={accepted_file}, chi2={current_chi2:.2f})")
+                else:
+                    n_burn_accepted += 1
+                    if n_burn_accepted >= burn_in:
+                        past_burn_in = True
+                        log.info(f"MCMC burn-in complete after {n_burn_accepted} accepted steps")
+
+            # Periodic progress logging
+            if n_total % 100 == 0:
+                rate = (n_accepted / n_total * 100) if n_total > 0 else 0
+                log.info(f"MCMC progress: {n_accepted}/{self.num_models} accepted, "
+                         f"{n_total} total attempts, acceptance rate: {rate:.1f}%")
+
+        # Clean up scratch files
+        self._cleanup_scratch_files(scratch_idx)
+
+        # Replace self.points with accepted values
+        for key in self.parameters:
+            self.points[key] = np.array(accepted_points[key])
+
+        if n_accepted < self.num_models:
+            log.warning(f"MCMC stopped at max_attempts={max_attempts} with {n_accepted} models")
+            self.num_models = n_accepted
+
+        log.info(f"MCMC complete: {n_accepted} models, {n_total} proposals, "
+                 f"rate={n_accepted/max(n_total,1)*100:.1f}%")
+
+        return None
+
+    def _build_proposal_widths(self) -> dict:
+        '''Build dict of proposal widths, using configured values or 5% of range as default.'''
+        configured = self.mcmc.get('proposal_widths', {})
+        widths = {}
+        for key, scanrange in self.parameters.items():
+            if key in configured:
+                widths[key] = configured[key]
+            else:
+                if isinstance(scanrange[0], list):
+                    total_range = sum(sr[1] - sr[0] for sr in scanrange)
+                else:
+                    total_range = scanrange[1] - scanrange[0]
+                widths[key] = abs(total_range) * 0.05
+        return widths
+
+    def _sample_initial_point(self) -> dict:
+        '''Sample a random starting point within all parameter bounds.'''
+        point = {}
+        for key, scanrange in self.parameters.items():
+            if isinstance(scanrange[0], list):
+                # Pick a random subrange weighted by width, then uniform within it
+                range_widths = [sr[1] - sr[0] for sr in scanrange]
+                total = sum(range_widths)
+                probs = [w / total for w in range_widths]
+                idx = np.random.choice(len(scanrange), p=probs)
+                point[key] = np.random.uniform(scanrange[idx][0], scanrange[idx][1])
+            else:
+                point[key] = np.random.uniform(scanrange[0], scanrange[1])
+        return point
+
+    def _propose(self, current: dict, widths: dict) -> dict:
+        '''Propose a new point using Gaussian perturbation with boundary handling.'''
+        proposed = {}
+        for key, value in current.items():
+            if widths[key] == 0:
+                proposed[key] = value
+                continue
+
+            new_val = value + np.random.normal(0, widths[key])
+            scanrange = self.parameters[key]
+
+            if isinstance(scanrange[0], list):
+                # Interrupted range: reject this dimension if proposed falls in a gap
+                in_range = any(sr[0] <= new_val <= sr[1] for sr in scanrange)
+                proposed[key] = new_val if in_range else value
+            else:
+                proposed[key] = self._reflect(new_val, scanrange[0], scanrange[1])
+
+        return proposed
+
+    @staticmethod
+    def _reflect(value: float, low: float, high: float) -> float:
+        '''Reflect value into [low, high] interval to preserve detailed balance.'''
+        if low == high:
+            return low
+        while value < low or value > high:
+            if value < low:
+                value = 2 * low - value
+            if value > high:
+                value = 2 * high - value
+        return value
+
+    def _run_and_evaluate(self, modelnum: int) -> float:
+        '''Run all pipeline steps for modelnum, then compute chi2 from constraints.
+        Returns a large penalty value if the pipeline fails.'''
+        penalty = 1e6
+
+        for step in self.steps:
+            success = self.run_step(modelnum=modelnum, **step)
+            if not success:
+                return penalty
+
+        chi2 = 0.0
+        for constraint in self.constraints:
+            obs_value = self._extract_observable(modelnum, constraint['source'])
+            if obs_value is None or np.isnan(obs_value):
+                return penalty
+            chi2 += self._compute_chi2_term(obs_value, constraint)
+
+        return chi2
+
+    def _extract_observable(self, modelnum: int, source: dict) -> float:
+        '''Extract an observable value from a pipeline output file.
+
+        source dict keys:
+          step      : pipeline step name (e.g. "SPheno", "micromegas")
+          file_type : "slha", "csv", or "flha"
+          block     : SLHA/FLHA block name (for slha/flha types)
+          entry     : entry key, int or list for tuple keys (for slha/flha types)
+          variable  : variable name (for csv type)
+        '''
+        # Find the output directory for this step
+        step_config = None
+        for s in self.steps:
+            if s['name'] == source['step']:
+                step_config = s
+                break
+        if step_config is None:
+            log.error(f"Step {source['step']} not found in pipeline steps")
+            return None
+
+        file_type = source['file_type']
+
+        try:
+            if file_type in ('slha', 'flha'):
+                ext = '.slha' if file_type == 'slha' else '.flha'
+                filepath = f"{self.scan_dir}/{step_config['output_dir']}/{modelnum}{ext}"
+                slha_data = pyslha.read(filepath, ignorenomass=True, ignoreblocks=['SPINFO'])
+                entry_key = source['entry']
+                if isinstance(entry_key, list):
+                    entry_key = tuple(entry_key)
+                value = slha_data.blocks[source['block']].entries[entry_key]
+                if isinstance(value, tuple):
+                    value = value[0]
+                return float(value)
+
+            elif file_type == 'csv':
+                filepath = f"{self.scan_dir}/{step_config['output_dir']}/{modelnum}.csv"
+                # Invalidate csvReader cache so we always read fresh data
+                csvReader.cacheName = ""
+                csv_data = csvReader.read(filepath)
+                variable = source['variable']
+                for col in csv_data:
+                    if variable in csv_data[col]:
+                        return float(csv_data[col][variable])
+                log.warning(f"Variable {variable} not found in {filepath}")
+                return None
+
+            else:
+                log.error(f"Unsupported file_type: {file_type}")
+                return None
+
+        except Exception as e:
+            log.warning(f"Failed to extract observable from {source}: {e}")
+            return None
+
+    @staticmethod
+    def _compute_chi2_term(obs_value: float, constraint: dict) -> float:
+        '''Compute chi-squared contribution from a single constraint.'''
+        central = constraint['central']
+        sigma = constraint['uncertainty']
+        ctype = constraint.get('type', 'gaussian')
+
+        if ctype == 'gaussian':
+            return ((obs_value - central) / sigma) ** 2
+        elif ctype == 'upper_bound':
+            if obs_value > central:
+                return ((obs_value - central) / sigma) ** 2
+            return 0.0
+        elif ctype == 'lower_bound':
+            if obs_value < central:
+                return ((central - obs_value) / sigma) ** 2
+            return 0.0
+        else:
+            raise ValueError(f"Unknown constraint type: {ctype}")
+
+    def _accept_proposal(self, current_chi2: float, proposed_chi2: float) -> bool:
+        '''Metropolis-Hastings acceptance criterion.
+        Likelihood is proportional to exp(-chi2/2).'''
+        delta_chi2 = proposed_chi2 - current_chi2
+        if delta_chi2 <= 0:
+            return True
+        return np.random.uniform() < np.exp(-delta_chi2 / 2.0)
+
+    def _commit_accepted_model(self, scratch_idx: int, accepted_idx: int) -> None:
+        '''Copy pipeline output files from scratch index to final accepted index.'''
+        for step in self.steps:
+            if 'output_dir' not in step:
+                continue
+            odir = f"{self.scan_dir}/{step['output_dir']}"
+
+            # Determine file extension based on step type
+            if 'micromegas' in step['name']:
+                exts = ['.csv']
+            elif 'superiso' in step['name']:
+                exts = ['.flha']
+            elif 'evade' in step['name']:
+                exts = ['.tsv']
+            elif 'SModelS' in step['name']:
+                exts = ['.slha.py']
+            else:
+                exts = ['.slha']
+
+            for ext in exts:
+                src = f"{odir}/{scratch_idx}{ext}"
+                dst = f"{odir}/{accepted_idx}{ext}"
+                if os.path.exists(src):
+                    shutil.copy2(src, dst)
+
+            # Handle extra directories for micromegas raw output
+            if 'micromegas' in step['name']:
+                raw_src = f"{odir}_raw/{scratch_idx}.out"
+                raw_dst = f"{odir}_raw/{accepted_idx}.out"
+                if os.path.exists(raw_src):
+                    shutil.copy2(raw_src, raw_dst)
+
+            # Handle log files
+            if 'log_dir' in step:
+                ldir = f"{self.scan_dir}/{step['log_dir']}"
+                lsrc = f"{ldir}/{scratch_idx}.log"
+                ldst = f"{ldir}/{accepted_idx}.log"
+                if os.path.exists(lsrc):
+                    shutil.copy2(lsrc, ldst)
+
+    def _cleanup_scratch_files(self, scratch_idx: int) -> None:
+        '''Remove scratch files left over from the MCMC working index.'''
+        for step in self.steps:
+            if 'output_dir' not in step:
+                continue
+            odir = f"{self.scan_dir}/{step['output_dir']}"
+
+            if 'micromegas' in step['name']:
+                exts = ['.csv']
+            elif 'superiso' in step['name']:
+                exts = ['.flha']
+            elif 'evade' in step['name']:
+                exts = ['.tsv']
+            elif 'SModelS' in step['name']:
+                exts = ['.slha.py']
+            else:
+                exts = ['.slha']
+
+            for ext in exts:
+                f = f"{odir}/{scratch_idx}{ext}"
+                if os.path.exists(f):
+                    os.remove(f)
+
+            if 'micromegas' in step['name']:
+                f = f"{odir}_raw/{scratch_idx}.out"
+                if os.path.exists(f):
+                    os.remove(f)
+
+            if 'log_dir' in step:
+                f = f"{self.scan_dir}/{step['log_dir']}/{scratch_idx}.log"
+                if os.path.exists(f):
+                    os.remove(f)
+
+    # ── End of MCMC methods ───────────────────────────────────────────
+
     def run_step(self, modelnum: int, **kwargs) -> bool:
         '''Function decorator for exectuting run_* function. Returns success bool.'''
         step_name = kwargs['name']
@@ -195,6 +534,13 @@ class ModelGenerator:
             if "There has been a problem during the run." in loglines.strip() or "The error has occured" in loglines.strip(): success = False
             else: success = True
 
+        # Validate output using same pyslha parsing as ntupling readSLHA
+        if success:
+            try:
+                pyslha.readSLHAFile(outfile, ignorenomass=True)
+            except:
+                success = False
+
         # Re-add input blocks needed for other tools since SPheno swallows them:
         if success: addinputblocks(infile=outfile, blocksfile=self.rawfilen)
         
@@ -209,7 +555,14 @@ class ModelGenerator:
         
         retcode = os.system(f"softpoint.x leshouches < {infile} &> {outfile}")
         if retcode == 0: success = True
-        
+
+        # Validate output using same pyslha parsing as ntupling readSLHA
+        if success:
+            try:
+                pyslha.readSLHAFile(outfile, ignorenomass=True)
+            except:
+                success = False
+
         return success
     
     def run_micromegas(self, modelnum: int, **kwargs) -> bool:
@@ -431,14 +784,21 @@ class ModelGenerator:
             self.sample_flat()
         elif self.prior == 'fixed':
             self.sample_fixed()
+        elif self.prior == 'mcmc':
+            # MCMC runs the pipeline internally during sampling.
+            # After sample_mcmc() returns, self.points is populated with accepted models,
+            # and all output files are already written at indices 0..num_models-1.
+            self.sample_mcmc()
+            self._dump_scan_config()
+            return None
         else:
-            raise ValueError(f"ERROR: prior {self.prior} not supported. Can only be flat.")
-        
+            raise ValueError(f"ERROR: prior {self.prior} not supported. Can be: flat, fixed, mcmc.")
+
         # prep dict to keep track of successes:
         succcounts = {}
         for step in self.steps:
             succcounts[step['name']] = 0
-        
+
         for mod in range(self.num_models):
             log.info(f"Generating Model: {mod}.slha ({mod+1}/{self.num_models})")
 
@@ -453,18 +813,21 @@ class ModelGenerator:
                 # Keep track of successes
                 if success: succcounts[step['name']] += 1
                 else: model_ok = False
-         
-        # Dump scan config in scan_dir
+
+        self._dump_scan_config()
+
+        log.info("Finished generating models! Stats for successful generations (successful/attempted):")
+        for step in succcounts:
+            log.info(f"\t{step}: {succcounts[step]}/{self.num_models}.")
+
+        return None
+
+    def _dump_scan_config(self) -> None:
+        '''Dump scan configuration to YAML file in scan directory.'''
         with open(f"{self.scan_dir}/scan_config.yaml", "w") as file:
             skipkeys = ['points']
             dumpdict = {key: value for key, value in vars(self).items() if key not in skipkeys}
             yaml.dump(dumpdict, file, default_flow_style=None, encoding=None)
-                
-        log.info("Finished generating models! Stats for successful generations (successful/attempted):")
-        for step in succcounts:
-            log.info(f"\t{step}: {succcounts[step]}/{self.num_models}.")
-        
-        return None
     
     def mkntuple(self) -> None:
         '''Promote ntuple making to class attribute.'''

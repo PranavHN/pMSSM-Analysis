@@ -10,34 +10,25 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 - [Installation](#installation)
   - [pixi](#pixi)
   - [Run3ModelGen](#run3modelgen)
+  - [Environments](#environments)
 - [On startup](#on-startup)
 - [Running](#running)
+  - [Sampling priors](#sampling-priors)
   - [Changing the scan configuration](#changing-the-scan-configuration)
+  - [MCMC sampling](#mcmc-sampling)
   - [Extracting interesting models](#extracting-interesting-models)
     - [From scan directories](#from-scan-directories)
     - [From .tar balls directly](#from-tar-balls-directly)
   - [HTCondor](#htcondor)
     - [Generating models](#generating-models)
     - [Extracting models](#extracting-models)
+- [Documentation](#documentation)
 - [FAQ](#faq)
   - [Adding software/updating the software version](#adding-softwareupdating-the-software-version)
   - [Fixing the parameter points](#fixing-the-parameter-points)
   - [Gaps in the scan ranges](#gaps-in-the-scan-ranges)
   - [cmake_build_env.sh](#cmake_build_envsh)
   - [pixi](#pixi-1)
-  
-
-# Targets
-- [x] Move from shell scripts to Makefile structure for building
-- [x] migrate to alma9
-- [x] Dockerise
-- [x] Add CI
-- [ ] Update software content
-- [ ] Add missing functionalities
-- [ ] Make compatible with GAMBIT scanners
-- [ ] Improve overall readability & Useability
-- [x] Add release notes incl. versions for external software.
-- [x] Make venv to not clutter the user's local AB python -> solved with pixi!
 
 ## Software content
 
@@ -54,6 +45,8 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 ## Functionalities
 
 - [x] Script to run flat scan & save output models
+- [x] MCMC sampling with physics-based constraints
+- [x] Config file management with `genConfig.py`
 - [x] Docker images of framework
 - [x] Ntuple making
   - [x] Add ability to specify steps and their outputs diverging from defaults.
@@ -88,9 +81,24 @@ cmake --build build -j8
 source build/setup.sh
 ```
 
+## Environments
+
+The project provides two pixi environments:
+
+**Default environment** — contains the full build toolchain (compilers, cmake), all Python dependencies, and the external physics software. This is what you use for building and running scans. ROOT ntuples are produced and read using [uproot](https://uproot.readthedocs.io/), a pure-Python library for ROOT file I/O that does **not** require a ROOT installation. uproot is included in the default environment automatically.
+
+**`rootenv` environment** — a lightweight, standalone environment containing only Python 3.11 and [ROOT](https://root.cern/) (>= 6.30). It does **not** include the build toolchain or any physics software. Use this for tasks that require the full ROOT framework (TBrowser, RDataFrame, PyROOT, ROOT macros, etc.):
+
+```bash
+pixi shell -e rootenv                    # Enter the ROOT environment
+pixi run -e rootenv python my_analysis.py  # Run a script in rootenv
+```
+
+Since `rootenv` is defined with `no-default-feature = true`, it is fully independent of the default environment and resolves quickly. For more details on both environments, see [doc/pixi.md](doc/pixi.md).
+
 # On startup
 
-As perviously mentioned, pixi should be ready to use as per your `.bash_profile`, so there is no need to do anything here. 
+As perviously mentioned, pixi should be ready to use as per your `.bash_profile`, so there is no need to do anything here.
 For settup up the Run3ModelGen, please simply execute:
 
 ```bash
@@ -98,6 +106,11 @@ pixi shell
 source build/setup.sh
 ```
 And you're good to go!
+
+If you need ROOT for analysis, use the `rootenv` environment instead:
+```bash
+pixi shell -e rootenv
+```
 
 # Running
 
@@ -109,73 +122,72 @@ genModels.py
 
 The script will save the created model files and the corresponding root ntuple.
 
+## Sampling priors
+
+Run3ModelGen supports three sampling priors:
+
+| Prior | Description |
+| --- | --- |
+| `flat` | Draws parameters uniformly at random within specified ranges. |
+| `fixed` | Runs the pipeline on a specific set of parameter points. |
+| `mcmc` | Metropolis-Hastings MCMC guided by physics constraints. See [MCMC sampling](#mcmc-sampling). |
+
+The prior is set in the config file via `prior: flat`, `prior: fixed`, or `prior: mcmc`.
+
 ## Changing the scan configuration
 
 If you would like to change the scan configuration or seed, simply run
 
 ```bash
-genModels.py --config_file myconfig.yaml --seed 42 
+genModels.py --config_file myconfig.yaml --seed 42
 ```
 
-where `myconfig.yaml` is your config file containing the scan configuration. If no config file is supplied, the [default config file](source/Run3ModelGen/data/default_config.yaml) will be read. All values that are missing from `myconfig.yaml` are read from the default as well.
+where `myconfig.yaml` is your config file containing the scan configuration. If no config file is supplied, the [default config file](source/Run3ModelGen/data/configs/default_config.yaml) will be read. All values that are missing from `myconfig.yaml` are read from the default as well. For full details on the config file format, see [doc/configs.md](doc/configs.md).
 
-Here the contents of this default configuration:
+To generate an example config file for a given prior, use the `genConfig.py` script:
+
+```bash
+genConfig.py flat                      # Generates example_flat_config.yaml in current dir
+genConfig.py mcmc --output_dir myrun/  # Generates example_mcmc_config.yaml in myrun/
+genConfig.py fixed                     # Generates example_fixed_config.yaml in current dir
+```
+
+Example configs are stored in [source/Run3ModelGen/data/configs/](source/Run3ModelGen/data/configs/).
+
+## MCMC sampling
+
+MCMC sampling uses the Metropolis-Hastings algorithm to explore parameter space guided by physics observables. Instead of sampling uniformly, the chain preferentially visits regions where computed observables (e.g. Higgs mass, relic density) agree with experimental measurements.
+
+To use MCMC, set `prior: mcmc` and define constraints in your config file:
 
 ```yaml
-scan_dir: scan
-prior: flat
-num_models: 3
-isGMSB: False
-parameters:
-  tanb: [1, 60]
-  M_1: [-2000, 2000]
-  M_2: [-2000, 2000]
-  M_3: [4000, 4000]
-  AT: [-8000, 8000]
-  Ab: [-2000, 2000]
-  Atau: [-2000, 2000]
-  mu: [-2000, 2000]
-  mA: [2000, 2000]
-  meL: [0, 2000]
-  mtauL: [2000, 2000]
-  meR: [0, 2000]
-  mtauR: [2000, 2000]
-  mqL1: [4000, 4000]
-  mqL3: [4000, 4000]
-  muR: [4000, 4000]
-  mtR: [4000, 4000]
-  mdR: [4000, 4000]
-  mbR: [4000, 4000]
-steps:
-  - name: prep_input
-    output_dir: input
-    prefix: IN
-  - name: SPheno
-    input_dir: input
-    output_dir: SPheno
-    log_dir: SPheno_log
-    prefix: SP
-  - name: softsusy
-    input_dir: input
-    output_dir: softsusy
-    prefix: SS
-  - name: micromegas
-    input_dir: SPheno
-    output_dir: micromegas
-    prefix: MO
-  - name: superiso
-    input_dir: SPheno
-    output_dir: superiso
-    prefix: SI
-  - name: gm2calc
-    input_dir: SPheno
-    output_dir: gm2calc
-    prefix: GM2
-  - name: evade
-    input_dir: SPheno
-    output_dir: evade
-    prefix: EV
+prior: mcmc
+num_models: 500
+
+mcmc:
+  burn_in: 100
+  max_attempts: 50000
+  accept_invalid: false
+
+constraints:
+  - name: higgs_mass
+    source:
+      step: SPheno
+      file_type: slha
+      block: MASS
+      entry: 25
+    type: gaussian
+    central: 125.09
+    uncertainty: 3.0
 ```
+
+Key MCMC settings:
+- **`burn_in`**: Number of accepted steps to discard before collecting models.
+- **`max_attempts`**: Hard cap on total proposals (includes burn-in).
+- **`accept_invalid`**: If `false` (default), models where the pipeline failed are not saved.
+- **`proposal_widths`**: Optional per-parameter Gaussian step sizes (default: 5% of range).
+
+For full details, see [doc/mcmc.md](doc/mcmc.md). For constraint specification, see [doc/constraints.md](doc/constraints.md).
 
 ## Extracting interesting models
 
@@ -226,6 +238,19 @@ extractModels_condor.py --eos_dir /eos/user/j/jwuerzin/Run3ModelGen/15280231 --s
 The output `Models` directory can be fed into the pMSSMFactory directly and is stored in `$EOSPATH/SelectedModels/<ClusterId>/`. The corresponding config .yaml file is also stored there.
 
 The HTCondor job flavour can be changed using the `--flavour` flag.
+
+# Documentation
+
+Detailed documentation is available in the [doc/](doc/) directory:
+
+- [doc/mcmc.md](doc/mcmc.md) - MCMC sampling algorithm, configuration, and output
+- [doc/constraints.md](doc/constraints.md) - Physics constraints specification (types, sources, examples)
+- [doc/configs.md](doc/configs.md) - Configuration system, prior types, and `genConfig.py` usage
+- [doc/pixi.md](doc/pixi.md) - pixi package manager: environments, tasks, dependencies
+- [doc/spheno_build.md](doc/spheno_build.md) - SPheno build notes
+- [doc/softsusy_build.md](doc/softsusy_build.md) - Softsusy build notes
+- [doc/micromegas_build.md](doc/micromegas_build.md) - micrOMEGAs build notes
+- [doc/superiso_build.md](doc/superiso_build.md) - SuperIso build notes
 
 # FAQ
 
@@ -290,31 +315,6 @@ source/cmake_build_env.sh -s source -b build
 
 ## pixi
 
-If you wish to edit the pixi package content, you can either edit the `pixi.toml` file directly, or use (some of) these handy commands which I used to initiate the repo:
+For detailed information on pixi usage, environments (including the lightweight `rootenv`), tasks, dependency management, and troubleshooting, see [doc/pixi.md](doc/pixi.md).
 
-```bash
-# Install pixi & initialise
-curl -fsSL https://pixi.sh/install.sh | bash
-. ~/.bash_profile 
-pixi init .
-
-# general dependencies
-time pixi add 'python=3.11'
-time pixi add gfortran
-time pixi add cc
-time pixi add gcc
-time pixi add cxx-compiler
-time pixi add cmake
-time pixi add make
-time pixi add which
-
-# python packages on conda
-time pixi add numpy
-time pixi add pyyaml
-time pixi add pyslha
-
-# start shell
-pixi shell
-```
-
-Please refrain from editing the `pixi.lock` file directly!
+**Important:** Never edit `pixi.lock` directly — it is generated automatically from `pixi.toml`.
