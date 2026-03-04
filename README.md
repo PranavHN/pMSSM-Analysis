@@ -17,6 +17,7 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
   - [Changing the scan configuration](#changing-the-scan-configuration)
   - [MCMC sampling](#mcmc-sampling)
   - [Grid sampling](#grid-sampling)
+  - [Importance sampling](#importance-sampling)
   - [Extracting interesting models](#extracting-interesting-models)
     - [From scan directories](#from-scan-directories)
     - [From .tar balls directly](#from-tar-balls-directly)
@@ -48,6 +49,7 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 - [x] Script to run flat scan & save output models
 - [x] MCMC sampling with physics-based constraints
 - [x] Grid sampling with Cartesian product over parameter values
+- [x] Importance sampling by perturbing known viable seed models
 - [x] Config file management with `genConfig.py`
 - [x] Docker images of framework
 - [x] Ntuple making
@@ -126,7 +128,7 @@ The script will save the created model files and the corresponding root ntuple.
 
 ## Sampling priors
 
-Run3ModelGen supports four sampling priors:
+Run3ModelGen supports five sampling priors:
 
 | Prior | Description |
 | --- | --- |
@@ -134,8 +136,9 @@ Run3ModelGen supports four sampling priors:
 | `fixed` | Runs the pipeline on a specific set of parameter points. |
 | `mcmc` | Metropolis-Hastings MCMC guided by physics constraints. See [MCMC sampling](#mcmc-sampling). |
 | `grid` | Cartesian product over specified parameter values. See [Grid sampling](#grid-sampling). |
+| `importance` | Perturbs known viable seed models with narrow Gaussians. See [Importance sampling](#importance-sampling). |
 
-The prior is set in the config file via `prior: flat`, `prior: fixed`, `prior: mcmc`, or `prior: grid`.
+The prior is set in the config file via `prior: flat`, `prior: fixed`, `prior: mcmc`, `prior: grid`, or `prior: importance`.
 
 ## Changing the scan configuration
 
@@ -154,6 +157,7 @@ genConfig.py flat                      # Generates example_flat_config.yaml in c
 genConfig.py mcmc --output_dir myrun/  # Generates example_mcmc_config.yaml in myrun/
 genConfig.py fixed                     # Generates example_fixed_config.yaml in current dir
 genConfig.py grid                      # Generates example_grid_config.yaml in current dir
+genConfig.py importance                # Generates example_importance_config.yaml in current dir
 ```
 
 Example configs are stored in [source/Run3ModelGen/data/configs/](source/Run3ModelGen/data/configs/).
@@ -225,6 +229,35 @@ Key differences from other priors:
 - The `num_models` value in the config is **overridden** by the total grid size.
 - The 10,000-model-per-job cap applies: if the grid product exceeds 10,000, split into multiple jobs.
 - Like `flat` and `fixed`, the pipeline runs after all models are sampled (unlike `mcmc`, which runs the pipeline during sampling).
+
+For full details on the config format, see [doc/configs.md](doc/configs.md).
+
+## Importance sampling
+
+Importance sampling generates models by perturbing known viable parameter points with narrow Gaussian widths. This is useful for exploring narrow corridors in parameter space (e.g. co-annihilation strips, compressed spectra) where both MCMC and grid sampling fail because the viable region is too narrow to find from random or evenly-spaced starting points.
+
+To use importance sampling, set `prior: importance` and provide a seed CSV file plus perturbation settings:
+
+```yaml
+prior: importance
+num_models: 100  # overridden by n_seeds × perturbations_per_seed
+
+importance:
+  seed_file: seeds.csv          # CSV with one row per seed model
+  perturbations_per_seed: 10    # Gaussian perturbations per seed
+  proposal_widths:              # per-parameter step sizes (optional)
+    M_1: 10.0                   # narrow — must stay near seed
+    meL: 10.0
+    AT: 200.0
+```
+
+The seed CSV must have a header row with columns matching the pMSSM parameter names in the config (e.g. `M_1`, `M_2`, `tanb`, ...). Additional columns (`scan_dir`, `model_id`) are ignored. Each seed is perturbed `perturbations_per_seed` times using Gaussian noise with the specified widths, reflected at the boundaries defined in `parameters`.
+
+Key points:
+- The `num_models` value is **overridden** by `n_seeds × perturbations_per_seed`.
+- Parameters without an explicit `proposal_widths` entry default to 2% of their range.
+- Uses the same `_propose()` / `_reflect()` methods as MCMC for boundary-aware perturbation.
+- Like `flat` and `grid`, the pipeline runs after all models are sampled.
 
 For full details on the config format, see [doc/configs.md](doc/configs.md).
 

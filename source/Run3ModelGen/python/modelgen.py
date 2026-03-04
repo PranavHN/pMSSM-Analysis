@@ -545,6 +545,89 @@ class ModelGenerator:
 
     # ── End of grid sampling ──────────────────────────────────────────
 
+    # ── Importance sampling ──────────────────────────────────────────
+
+    def sample_importance(self) -> None:
+        """Generate models by perturbing known viable seed parameters.
+
+        Reads seed CSV from self.importance['seed_file'], applies Gaussian
+        perturbations with widths from self.importance['proposal_widths'],
+        and generates perturbations_per_seed variants of each seed.
+        Uses _propose() for boundary-aware perturbation.
+        """
+        import csv
+
+        imp = getattr(self, 'importance', {})
+        if not imp:
+            raise ValueError("prior='importance' requires an 'importance' section in the YAML config")
+
+        seed_file = imp['seed_file']
+        perturbations_per_seed = imp.get('perturbations_per_seed', 10)
+
+        # Read seed CSV
+        if not os.path.isfile(seed_file):
+            raise FileNotFoundError(f"Seed file not found: {seed_file}")
+
+        with open(seed_file) as f:
+            reader = csv.DictReader(f)
+            seeds = list(reader)
+
+        n_seeds = len(seeds)
+        if n_seeds == 0:
+            raise ValueError(f"No seeds found in {seed_file}")
+
+        n_total = n_seeds * perturbations_per_seed
+        log.info(f"Importance sampling: {n_seeds} seeds × {perturbations_per_seed} perturbations = {n_total} models")
+
+        if n_total > 10000:
+            log.fatal(f"Importance sampling produces {n_total} models — exceeds the 10,000 limit!")
+            exit()
+
+        # Build proposal widths: use configured widths, default to 2% of param range
+        configured_widths = imp.get('proposal_widths', {})
+        param_names = [k for k in self.parameters.keys()]
+
+        default_widths = {}
+        for key, scanrange in self.parameters.items():
+            if isinstance(scanrange[0], list):
+                total_range = sum(sr[1] - sr[0] for sr in scanrange)
+            elif scanrange[0] == scanrange[1]:
+                total_range = 0
+            else:
+                total_range = scanrange[1] - scanrange[0]
+            default_widths[key] = 0.02 * total_range
+
+        widths = {}
+        for key in param_names:
+            widths[key] = configured_widths.get(key, default_widths[key])
+            if widths[key] > 0:
+                log.info(f"  {key}: width = {widths[key]:.2f}")
+
+        # Override num_models
+        self.num_models = n_total
+
+        # Initialize points arrays
+        for key in param_names:
+            self.points[key] = np.empty(n_total)
+
+        # Generate perturbations
+        idx = 0
+        for seed_row in seeds:
+            # Build current point from seed CSV
+            current = {}
+            for key in param_names:
+                current[key] = float(seed_row[key])
+
+            for _ in range(perturbations_per_seed):
+                proposed = self._propose(current, widths)
+                for key in param_names:
+                    self.points[key][idx] = proposed[key]
+                idx += 1
+
+        log.info(f"Importance sampling complete: {n_total} models from {n_seeds} seeds")
+
+    # ── End of importance sampling ────────────────────────────────────
+
     def run_step(self, modelnum: int, **kwargs) -> bool:
         '''Function decorator for exectuting run_* function. Returns success bool.'''
         step_name = kwargs['name']
@@ -869,8 +952,10 @@ class ModelGenerator:
             return None
         elif self.prior == 'grid':
             self.sample_grid()
+        elif self.prior == 'importance':
+            self.sample_importance()
         else:
-            raise ValueError(f"ERROR: prior {self.prior} not supported. Can be: flat, fixed, mcmc, grid.")
+            raise ValueError(f"ERROR: prior {self.prior} not supported. Can be: flat, fixed, mcmc, grid, importance.")
 
         # prep dict to keep track of successes:
         succcounts = {}
