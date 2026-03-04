@@ -167,6 +167,35 @@ genModels_mcmc_docker:
     expire_in: 1 day
 
 # ---------------------------------------------------------------------------
+# genModels stage — grid prior
+# ---------------------------------------------------------------------------
+
+genModels_grid_local:
+  extends: .setup_local
+  stage: genModels
+  needs: [build_local]
+  script:
+    - cd run
+    - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_grid_config.yaml --scan_dir scan_grid
+  artifacts:
+    paths:
+      - run/scan_grid
+    expire_in: 1 day
+
+genModels_grid_docker:
+  extends: .setup_docker
+  stage: genModels
+  needs: [build_docker]
+  image: ${CI_IMAGE}
+  script:
+    - cd run
+    - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_grid_config.yaml --scan_dir scan_grid
+  artifacts:
+    paths:
+      - run/scan_grid
+    expire_in: 1 day
+
+# ---------------------------------------------------------------------------
 # extractModels stage — runs on the flat scan output
 # ---------------------------------------------------------------------------
 
@@ -203,6 +232,8 @@ publish_docker:
       artifacts: false
     - job: genModels_mcmc_docker
       artifacts: false
+    - job: genModels_grid_docker
+      artifacts: false
     - job: extractModels_docker
       artifacts: false
     # Local tests
@@ -211,6 +242,8 @@ publish_docker:
     - job: genModels_fixed_local
       artifacts: false
     - job: genModels_mcmc_local
+      artifacts: false
+    - job: genModels_grid_local
       artifacts: false
     - job: extractModels_local
       artifacts: false

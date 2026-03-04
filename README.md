@@ -16,6 +16,7 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
   - [Sampling priors](#sampling-priors)
   - [Changing the scan configuration](#changing-the-scan-configuration)
   - [MCMC sampling](#mcmc-sampling)
+  - [Grid sampling](#grid-sampling)
   - [Extracting interesting models](#extracting-interesting-models)
     - [From scan directories](#from-scan-directories)
     - [From .tar balls directly](#from-tar-balls-directly)
@@ -46,6 +47,7 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 
 - [x] Script to run flat scan & save output models
 - [x] MCMC sampling with physics-based constraints
+- [x] Grid sampling with Cartesian product over parameter values
 - [x] Config file management with `genConfig.py`
 - [x] Docker images of framework
 - [x] Ntuple making
@@ -124,15 +126,16 @@ The script will save the created model files and the corresponding root ntuple.
 
 ## Sampling priors
 
-Run3ModelGen supports three sampling priors:
+Run3ModelGen supports four sampling priors:
 
 | Prior | Description |
 | --- | --- |
 | `flat` | Draws parameters uniformly at random within specified ranges. |
 | `fixed` | Runs the pipeline on a specific set of parameter points. |
 | `mcmc` | Metropolis-Hastings MCMC guided by physics constraints. See [MCMC sampling](#mcmc-sampling). |
+| `grid` | Cartesian product over specified parameter values. See [Grid sampling](#grid-sampling). |
 
-The prior is set in the config file via `prior: flat`, `prior: fixed`, or `prior: mcmc`.
+The prior is set in the config file via `prior: flat`, `prior: fixed`, `prior: mcmc`, or `prior: grid`.
 
 ## Changing the scan configuration
 
@@ -150,6 +153,7 @@ To generate an example config file for a given prior, use the `genConfig.py` scr
 genConfig.py flat                      # Generates example_flat_config.yaml in current dir
 genConfig.py mcmc --output_dir myrun/  # Generates example_mcmc_config.yaml in myrun/
 genConfig.py fixed                     # Generates example_fixed_config.yaml in current dir
+genConfig.py grid                      # Generates example_grid_config.yaml in current dir
 ```
 
 Example configs are stored in [source/Run3ModelGen/data/configs/](source/Run3ModelGen/data/configs/).
@@ -188,6 +192,41 @@ Key MCMC settings:
 - **`proposal_widths`**: Optional per-parameter Gaussian step sizes (default: 5% of range).
 
 For full details, see [doc/mcmc.md](doc/mcmc.md). For constraint specification, see [doc/constraints.md](doc/constraints.md).
+
+## Grid sampling
+
+Grid sampling generates models on a Cartesian product over explicitly specified parameter values. This is useful for systematically covering a parameter subspace, for instance when targeting narrow phenomenological corridors that MCMC struggles to explore.
+
+To use grid sampling, set `prior: grid` and add a `grid` block mapping parameter names to lists of values:
+
+```yaml
+prior: grid
+num_models: 600  # overridden by the grid product
+
+parameters:
+  tanb: [5, 55]             # randomised (not on grid)
+  M_1: [-550, 550]          # grid axis (overridden below)
+  M_2: [2000, 2000]         # fixed
+  AT: [-6000, 6000]         # randomised
+  meL: [150, 650]           # grid axis (overridden below)
+  meR: [150, 650]           # grid axis (overridden below)
+  # ... other parameters ...
+
+grid:
+  M_1: [-500, -350, -200, -100, 100, 200, 350, 500]   # 8 values
+  meL: [160, 280, 400, 520, 640]                        # 5 values
+  meR: [160, 280, 400, 520, 640]                        # 5 values
+  tanb: [10, 30, 50]                                    # 3 values
+```
+
+This produces 8 x 5 x 5 x 3 = 600 grid points. Parameters listed in the `grid` block take their values from the Cartesian product; all other parameters are drawn uniformly at random (one independent draw per grid point) from their `parameters` ranges. Fixed parameters (`[val, val]`) remain constant across all grid points. Interrupted ranges are also supported for non-grid parameters.
+
+Key differences from other priors:
+- The `num_models` value in the config is **overridden** by the total grid size.
+- The 10,000-model-per-job cap applies: if the grid product exceeds 10,000, split into multiple jobs.
+- Like `flat` and `fixed`, the pipeline runs after all models are sampled (unlike `mcmc`, which runs the pipeline during sampling).
+
+For full details on the config format, see [doc/configs.md](doc/configs.md).
 
 ## Extracting interesting models
 

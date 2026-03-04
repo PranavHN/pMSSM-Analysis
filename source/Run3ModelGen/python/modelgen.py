@@ -51,8 +51,14 @@ class ModelGenerator:
             # If num_models is not supplied and the prior is 'fixed', read number of models from parameters
             elif key == 'num_models' and config_dict.get('prior', None) == 'fixed':
                 setattr(self, key, len(config_dict['parameters']['tanb']))
-            else:                
+            else:
                 setattr(self, key, defaultval)
+
+        # Load extra config keys not in default (e.g., 'grid' for grid sampling)
+        default_keys = set(self.read_yaml_file(default_config).keys())
+        for key, value in config_dict.items():
+            if key not in default_keys:
+                setattr(self, key, value)
         
         # Check if too many models supplied
         if self.num_models > 10000:
@@ -469,6 +475,76 @@ class ModelGenerator:
 
     # ── End of MCMC methods ───────────────────────────────────────────
 
+    # ── Grid sampling ─────────────────────────────────────────────────
+
+    def sample_grid(self) -> None:
+        """Generate models on a Cartesian grid over specified parameters.
+
+        Parameters in self.parameters are split into two categories based on
+        the YAML config field ``grid`` (dict mapping param name → list of
+        explicit grid values).  Parameters listed in ``grid`` are expanded
+        into a Cartesian product; all other parameters are sampled uniformly
+        at random (one draw per grid point) from their ranges defined in
+        ``parameters``.
+
+        After expansion, ``self.num_models`` is overridden with the grid size
+        and ``self.points`` is populated identically to ``sample_flat``.
+        """
+        from itertools import product as cartesian_product
+
+        grid_spec = getattr(self, 'grid', {})
+        if not grid_spec:
+            raise ValueError("prior='grid' requires a 'grid' section in the YAML config")
+
+        # Build 1-D arrays for each grid parameter
+        grid_axes = {}
+        for param, values in grid_spec.items():
+            grid_axes[param] = np.array(values, dtype=float)
+            log.info(f"Grid axis: {param} → {len(values)} points")
+
+        # Cartesian product of all grid axes
+        axis_names = list(grid_axes.keys())
+        axis_arrays = [grid_axes[n] for n in axis_names]
+        grid_points = list(cartesian_product(*axis_arrays))
+        n_grid = len(grid_points)
+        log.info(f"Grid total: {n_grid} points from {len(axis_names)} axes")
+
+        if n_grid > 10000:
+            log.fatal(f"Grid produces {n_grid} points — exceeds the 10,000 model limit! "
+                       "Reduce grid axes or split into multiple jobs using genModels_condor.py.")
+            exit()
+
+        # Override num_models
+        self.num_models = n_grid
+
+        # Populate self.points
+        for i, name in enumerate(axis_names):
+            self.points[name] = np.array([pt[i] for pt in grid_points])
+
+        # Random-sample remaining parameters from their ranges
+        for key, scanrange in self.parameters.items():
+            if key in grid_spec:
+                continue
+            if isinstance(scanrange[0], list):
+                # Interrupted range — weighted sub-ranges
+                widths = [sr[1] - sr[0] for sr in scanrange]
+                total = sum(widths)
+                probs = [w / total for w in widths]
+                vals = np.empty(n_grid)
+                for j in range(n_grid):
+                    idx = np.random.choice(len(scanrange), p=probs)
+                    vals[j] = np.random.uniform(scanrange[idx][0], scanrange[idx][1])
+                self.points[key] = vals
+            elif scanrange[0] == scanrange[1]:
+                # Fixed value
+                self.points[key] = np.full(n_grid, scanrange[0])
+            else:
+                self.points[key] = np.random.uniform(scanrange[0], scanrange[1], n_grid)
+
+        log.info(f"Grid sampling complete: {n_grid} models")
+
+    # ── End of grid sampling ──────────────────────────────────────────
+
     def run_step(self, modelnum: int, **kwargs) -> bool:
         '''Function decorator for exectuting run_* function. Returns success bool.'''
         step_name = kwargs['name']
@@ -791,8 +867,10 @@ class ModelGenerator:
             self.sample_mcmc()
             self._dump_scan_config()
             return None
+        elif self.prior == 'grid':
+            self.sample_grid()
         else:
-            raise ValueError(f"ERROR: prior {self.prior} not supported. Can be: flat, fixed, mcmc.")
+            raise ValueError(f"ERROR: prior {self.prior} not supported. Can be: flat, fixed, mcmc, grid.")
 
         # prep dict to keep track of successes:
         succcounts = {}
