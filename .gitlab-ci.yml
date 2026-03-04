@@ -196,6 +196,37 @@ genModels_grid_docker:
     expire_in: 1 day
 
 # ---------------------------------------------------------------------------
+# genModels stage — importance prior
+# ---------------------------------------------------------------------------
+
+genModels_importance_local:
+  extends: .setup_local
+  stage: genModels
+  needs: [build_local]
+  script:
+    - cd run
+    - cp ../source/Run3ModelGen/data/configs/ci_importance_seeds.csv .
+    - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_importance_config.yaml --scan_dir scan_importance
+  artifacts:
+    paths:
+      - run/scan_importance
+    expire_in: 1 day
+
+genModels_importance_docker:
+  extends: .setup_docker
+  stage: genModels
+  needs: [build_docker]
+  image: ${CI_IMAGE}
+  script:
+    - cd run
+    - cp ../source/Run3ModelGen/data/configs/ci_importance_seeds.csv .
+    - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_importance_config.yaml --scan_dir scan_importance
+  artifacts:
+    paths:
+      - run/scan_importance
+    expire_in: 1 day
+
+# ---------------------------------------------------------------------------
 # extractModels stage — runs on the flat scan output
 # ---------------------------------------------------------------------------
 
@@ -234,6 +265,8 @@ publish_docker:
       artifacts: false
     - job: genModels_grid_docker
       artifacts: false
+    - job: genModels_importance_docker
+      artifacts: false
     - job: extractModels_docker
       artifacts: false
     # Local tests
@@ -244,6 +277,8 @@ publish_docker:
     - job: genModels_mcmc_local
       artifacts: false
     - job: genModels_grid_local
+      artifacts: false
+    - job: genModels_importance_local
       artifacts: false
     - job: extractModels_local
       artifacts: false

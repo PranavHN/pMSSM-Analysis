@@ -1,0 +1,48 @@
+# Lightweight importance sampling config for CI testing.
+# Uses a small seed file and reduced pipeline to keep CI fast.
+prior: importance
+isGMSB: False
+num_models: 4
+
+importance:
+  seed_file: ci_importance_seeds.csv
+  perturbations_per_seed: 2
+  proposal_widths:
+    M_1: 30.0
+    M_2: 50.0
+    tanb: 2.0
+
+parameters:
+  tanb: [1, 60]
+  M_1: [-2000, 2000]
+  M_2: [-2000, 2000]
+  M_3: [1000, 4000]
+  AT: [-8000, 8000]
+  Ab: [-2000, 2000]
+  Atau: [-2000, 2000]
+  mu: [-2000, 2000]
+  mA: [0, 2000]
+  meL: [0, 2000]
+  mtauL: [2000, 2000]
+  meR: [0, 2000]
+  mtauR: [2000, 2000]
+  mqL1: [4000, 4000]
+  mqL3: [0, 2000]
+  muR: [4000, 4000]
+  mtR: [0, 2000]
+  mdR: [4000, 4000]
+  mbR: [0, 2000]
+
+steps:
+  - name: prep_input
+    output_dir: input
+    prefix: IN
+  - name: SPheno
+    input_dir: input
+    output_dir: SPheno
+    log_dir: SPheno_log
+    prefix: SP
+  - name: softsusy
+    input_dir: input
+    output_dir: softsusy
+    prefix: SS
