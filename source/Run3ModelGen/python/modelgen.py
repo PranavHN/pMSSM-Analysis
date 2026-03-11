@@ -175,6 +175,7 @@ class ModelGenerator:
         accepted_points = {key: [] for key in self.parameters}
         n_accepted = 0
         n_total = 0
+        n_post_burnin = 0
         n_burn_accepted = 0
         past_burn_in = (burn_in == 0)
         if not past_burn_in:
@@ -215,10 +216,16 @@ class ModelGenerator:
                         log.info(f"MCMC burn-in complete after {n_burn_accepted} accepted steps")
 
             # Periodic progress logging
+            if past_burn_in:
+                n_post_burnin += 1
             if n_total % 100 == 0:
-                rate = (n_accepted / n_total * 100) if n_total > 0 else 0
-                log.info(f"MCMC progress: {n_accepted}/{self.num_models} accepted, "
-                         f"{n_total} total attempts, acceptance rate: {rate:.1f}%")
+                if past_burn_in:
+                    rate = (n_accepted / n_post_burnin * 100) if n_post_burnin > 0 else 0
+                    log.info(f"MCMC progress: {n_accepted}/{self.num_models} accepted, "
+                             f"{n_total} total attempts, acceptance rate: {rate:.1f}%")
+                else:
+                    log.info(f"MCMC burn-in progress: {n_burn_accepted}/{burn_in} accepted, "
+                             f"{n_total} total attempts")
 
         # Clean up scratch files
         self._cleanup_scratch_files(scratch_idx)
