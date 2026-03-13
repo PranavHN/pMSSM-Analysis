@@ -152,6 +152,7 @@ class ModelGenerator:
         burn_in = self.mcmc.get('burn_in', 0)
         max_attempts = self.mcmc.get('max_attempts', 100000)
         accept_invalid = self.mcmc.get('accept_invalid', False)
+        restart_after = self.mcmc.get('restart_after', None)
         penalty = 1e6
 
         # Use num_models as a scratch file index, separate from any valid
@@ -177,12 +178,27 @@ class ModelGenerator:
         n_total = 0
         n_post_burnin = 0
         n_burn_accepted = 0
+        n_restarts = 0
+        n_since_restart = 0
         past_burn_in = (burn_in == 0)
         if not past_burn_in:
             log.info(f"Starting MCMC burn-in ({burn_in} accepted steps)...")
 
         while n_accepted < self.num_models and n_total < max_attempts:
             n_total += 1
+            n_since_restart += 1
+
+            # Restart if burn-in is not converging
+            if restart_after is not None and not past_burn_in and n_since_restart >= restart_after:
+                n_restarts += 1
+                log.info(f"MCMC restart #{n_restarts} after {n_since_restart} attempts "
+                         f"({n_burn_accepted}/{burn_in} burn-in steps accepted)")
+                current = self._sample_initial_point()
+                for key, val in current.items():
+                    self.points[key][scratch_idx] = val
+                current_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
+                n_burn_accepted = 0
+                n_since_restart = 0
 
             proposed = self._propose(current, proposal_widths)
 

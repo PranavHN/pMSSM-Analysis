@@ -60,4 +60,5 @@ mcmc:
   burn_in: 0
   max_attempts: 10000
   accept_invalid: false
+  restart_after: null
 constraints: []
