@@ -39,7 +39,9 @@ LOG_DIR="${OUT_BASE}/logs"
 
 mkdir -p "${NTUPLE_DIR}" "${LOG_DIR}" "${R3MG_DIR}/logs"
 cd "${R3MG_DIR}"
-source build/setup.sh
+# build/setup.sh references $PYTHONPATH/$DATAPATH/$EOSPATH unguarded,
+# which trips `set -u`. Disable -u just for the sourcing.
+set +u; source build/setup.sh; set -u
 
 echo "=========================================="
 echo "[mcmc-test] job_id=${SLURM_JOB_ID}"
@@ -63,7 +65,7 @@ for seed in $(seq 0 $((N_CHAINS - 1))); do
          --output="${log_file}" \
          --error="${log_file}" \
          bash -c "
-            set -euo pipefail
+            set -eo pipefail
             cd '${R3MG_DIR}'
             source build/setup.sh
             pixi run genModels.py \
