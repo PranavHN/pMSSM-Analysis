@@ -23,7 +23,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=8
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=64G
+#SBATCH --mem=24G    # `interactive` caps MaxMemPerNode at 32 GB; 24 GB ≫ enough for 8× SPheno + micromegas
 #SBATCH --output=logs/mcmc_test_%j.out
 #SBATCH --error=logs/mcmc_test_%j.err
 
