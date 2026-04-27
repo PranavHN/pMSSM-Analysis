@@ -1,5 +1,6 @@
 '''Module for ModelGenerator class'''
 
+import math
 import yaml
 import numpy as np
 import os
@@ -147,6 +148,22 @@ class ModelGenerator:
         since the likelihood depends on computed observables. After completion,
         self.points contains only accepted models and output files exist at indices
         0 through num_models-1.
+
+        Diagnostics:
+            - Per-window log lines include the Metropolis acceptance rate
+              (`accept_metro`), which is what determines mixing — independent
+              of how many post-burn-in samples have been *committed*.
+            - End-of-run `[mcmc-summary]` line is emitted in a parseable format
+              for cross-chain diagnostics (split-R̂, ESS_bulk via
+              `scripts/mcmc_diagnostics.py`).
+
+        Optional adaptive proposal scaling during burn-in:
+            mcmc:
+              adapt_proposals:
+                enabled: true
+                target_acceptance: 0.25   # Roberts-Gelman-Gilks high-D optimum
+                window: 200               # proposals between adaptations
+                learning_rate: 0.05       # multiplicative step (log-scale)
         '''
         proposal_widths = self._build_proposal_widths()
         burn_in = self.mcmc.get('burn_in', 0)
@@ -154,6 +171,14 @@ class ModelGenerator:
         accept_invalid = self.mcmc.get('accept_invalid', False)
         restart_after = self.mcmc.get('restart_after', None)
         penalty = 1e6
+
+        # Adaptive proposal scaling (only during burn-in, to preserve detailed
+        # balance once we start collecting samples).
+        adapt_cfg = self.mcmc.get('adapt_proposals', {}) or {}
+        adapt_enabled = bool(adapt_cfg.get('enabled', False))
+        adapt_target = float(adapt_cfg.get('target_acceptance', 0.25))
+        adapt_window = int(adapt_cfg.get('window', 200))
+        adapt_lr = float(adapt_cfg.get('learning_rate', 0.05))
 
         # Use num_models as a scratch file index, separate from any valid
         # accepted index (0..num_models-1). This way every acceptance copies
@@ -174,19 +199,31 @@ class ModelGenerator:
         current_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
 
         accepted_points = {key: [] for key in self.parameters}
-        n_accepted = 0
-        n_total = 0
-        n_post_burnin = 0
+        n_accepted = 0          # committed (post-burn-in, valid) samples
+        n_total = 0              # total proposals attempted
+        n_post_burnin = 0        # proposals attempted after burn-in
         n_burn_accepted = 0
         n_restarts = 0
         n_since_restart = 0
+        # New diagnostic counters: Metropolis-rule acceptance and pipeline
+        # validity. These are independent of `n_accepted` (which only counts
+        # post-burn-in valid commits), and they're what mixing actually depends on.
+        n_metro_accepted = 0     # times the MH rule fired (any phase)
+        n_pipeline_invalid = 0   # proposals where the pipeline failed
+        n_window_proposed = 0    # rolling counts for adaptive scaling
+        n_window_accepted = 0
         past_burn_in = (burn_in == 0)
         if not past_burn_in:
             log.info(f"Starting MCMC burn-in ({burn_in} accepted steps)...")
+        if adapt_enabled:
+            log.info(f"Adaptive proposal scaling enabled "
+                     f"(target_acceptance={adapt_target:.2f}, "
+                     f"window={adapt_window}, learning_rate={adapt_lr:.3f})")
 
         while n_accepted < self.num_models and n_total < max_attempts:
             n_total += 1
             n_since_restart += 1
+            n_window_proposed += 1
 
             # Restart if burn-in is not converging
             if restart_after is not None and not past_burn_in and n_since_restart >= restart_after:
@@ -199,6 +236,9 @@ class ModelGenerator:
                 current_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
                 n_burn_accepted = 0
                 n_since_restart = 0
+                # Reset adaptation window so a freshly-restarted chain re-tunes.
+                n_window_proposed = 0
+                n_window_accepted = 0
 
             proposed = self._propose(current, proposal_widths)
 
@@ -208,16 +248,19 @@ class ModelGenerator:
 
             # Run pipeline at scratch index
             proposed_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
+            if proposed_chi2 >= penalty:
+                n_pipeline_invalid += 1
 
             if self._accept_proposal(current_chi2, proposed_chi2):
+                n_metro_accepted += 1
+                n_window_accepted += 1
                 current = proposed.copy()
                 current_chi2 = proposed_chi2
 
                 # Skip saving invalid points unless accept_invalid is set
                 if not accept_invalid and current_chi2 >= penalty:
-                    continue
-
-                if past_burn_in:
+                    pass  # state moved (detailed balance), but don't commit
+                elif past_burn_in:
                     self._commit_accepted_model(scratch_idx, n_accepted)
                     for key in self.parameters:
                         accepted_points[key].append(current[key])
@@ -231,17 +274,44 @@ class ModelGenerator:
                         past_burn_in = True
                         log.info(f"MCMC burn-in complete after {n_burn_accepted} accepted steps")
 
+            # Adaptive proposal scaling (burn-in only). Multiplicatively scale
+            # all widths to drive the rolling window's acceptance toward
+            # `adapt_target`. Detailed balance is preserved because adaptation
+            # stops the moment burn-in ends.
+            if (adapt_enabled and not past_burn_in
+                    and n_window_proposed >= adapt_window):
+                window_rate = n_window_accepted / n_window_proposed
+                # Avoid divide-by-zero if user sets target_acceptance=0
+                target = max(adapt_target, 1e-3)
+                # Robbins-Monro-style log-scale step toward target
+                factor = math.exp(adapt_lr * (window_rate - target) / target)
+                # Cap factor to keep adaptation gentle and avoid runaway scaling
+                factor = max(0.5, min(2.0, factor))
+                for k in proposal_widths:
+                    proposal_widths[k] *= factor
+                log.info(f"[adapt] window accept_rate={window_rate:.1%}, "
+                         f"factor={factor:.3f}; current widths={proposal_widths}")
+                n_window_proposed = 0
+                n_window_accepted = 0
+
             # Periodic progress logging
             if past_burn_in:
                 n_post_burnin += 1
             if n_total % 100 == 0:
+                accept_metro = n_metro_accepted / max(n_total, 1) * 100
+                invalid_frac = n_pipeline_invalid / max(n_total, 1) * 100
                 if past_burn_in:
-                    rate = (n_accepted / n_post_burnin * 100) if n_post_burnin > 0 else 0
-                    log.info(f"MCMC progress: {n_accepted}/{self.num_models} accepted, "
-                             f"{n_total} total attempts, acceptance rate: {rate:.1f}%")
+                    commit_rate = (n_accepted / n_post_burnin * 100) if n_post_burnin > 0 else 0
+                    log.info(f"MCMC progress: committed={n_accepted}/{self.num_models}, "
+                             f"total={n_total}, "
+                             f"accept_metro={accept_metro:.1f}%, "
+                             f"commit_rate={commit_rate:.1f}%, "
+                             f"invalid={invalid_frac:.1f}%")
                 else:
-                    log.info(f"MCMC burn-in progress: {n_burn_accepted}/{burn_in} accepted, "
-                             f"{n_total} total attempts")
+                    log.info(f"MCMC burn-in progress: burn_accepted={n_burn_accepted}/{burn_in}, "
+                             f"total={n_total}, "
+                             f"accept_metro={accept_metro:.1f}%, "
+                             f"invalid={invalid_frac:.1f}%")
 
         # Clean up scratch files
         self._cleanup_scratch_files(scratch_idx)
@@ -254,8 +324,32 @@ class ModelGenerator:
             log.warning(f"MCMC stopped at max_attempts={max_attempts} with {n_accepted} models")
             self.num_models = n_accepted
 
+        # Parseable end-of-run summary. Each chain emits one of these — across
+        # chains, scripts/mcmc_diagnostics.py computes split-R̂ and ESS_bulk.
         log.info(f"MCMC complete: {n_accepted} models, {n_total} proposals, "
                  f"rate={n_accepted/max(n_total,1)*100:.1f}%")
+        log.info(
+            f"[mcmc-summary] proposed={n_total} "
+            f"metro_accepted={n_metro_accepted} "
+            f"metro_accept_rate={n_metro_accepted/max(n_total,1):.4f} "
+            f"committed={n_accepted} "
+            f"pipeline_invalid={n_pipeline_invalid} "
+            f"invalid_rate={n_pipeline_invalid/max(n_total,1):.4f} "
+            f"restarts={n_restarts} "
+            f"final_widths={proposal_widths}"
+        )
+        if n_metro_accepted / max(n_total, 1) > 0.6:
+            log.warning(
+                "[mcmc-summary] Metropolis acceptance > 60% — proposal widths "
+                "are too small. Mixing will be slow; consider widening or "
+                "enabling adapt_proposals."
+            )
+        elif n_metro_accepted / max(n_total, 1) < 0.10:
+            log.warning(
+                "[mcmc-summary] Metropolis acceptance < 10% — proposal widths "
+                "are too large. Most compute is wasted on rejections; consider "
+                "narrowing or enabling adapt_proposals."
+            )
 
         return None
 

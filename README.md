@@ -194,6 +194,35 @@ Key MCMC settings:
 - **`max_attempts`**: Hard cap on total proposals (includes burn-in).
 - **`accept_invalid`**: If `false` (default), models where the pipeline failed are not saved.
 - **`proposal_widths`**: Optional per-parameter Gaussian step sizes (default: 5% of range).
+- **`adapt_proposals`** (optional): Robbins-Monro adaptive scaling of `proposal_widths` *during burn-in only*, to drive the rolling Metropolis acceptance rate toward `target_acceptance` (default 0.25 — Roberts-Gelman-Gilks high-D optimum). Adaptation stops automatically when burn-in ends so the post-burn-in chain remains detailed-balance-correct. Recommended unless you've already hand-tuned widths.
+  ```yaml
+  mcmc:
+    adapt_proposals:
+      enabled: true
+      target_acceptance: 0.25
+      window: 200
+      learning_rate: 0.05
+  ```
+
+### Diagnostics
+
+Each chain emits per-window log lines with the *Metropolis acceptance rate* (`accept_metro`) and the pipeline-validity rate, plus a parseable end-of-run summary line:
+
+```
+[mcmc-summary] proposed=12345 metro_accepted=3094 metro_accept_rate=0.2506 ...
+```
+
+Use `accept_metro` (not the commit rate) to judge proposal-width tuning — values outside ~10–60 % trigger a warning. To check across-chain convergence after a batch of jobs, run:
+
+```bash
+python source/Run3ModelGen/scripts/mcmc_diagnostics.py --data-dir /path/to/ntuple_dir
+# Or skip the file-level Ω-straddle filter to diagnose the unfiltered sampler:
+python source/Run3ModelGen/scripts/mcmc_diagnostics.py --data-dir /path/to/ntuple_dir --no-file-cut
+```
+
+This computes split-R̂ (Vehtari et al. 2021) and bulk-ESS per free parameter across all chain ROOT files in the directory, treating each file as a separate chain. Targets are `R̂ < 1.05` and `ESS > 400`. R̂ ≫ 1 means chains haven't mixed (likely needs wider proposals or longer chains); ESS ≪ raw sample count means within-chain autocorrelation is long (likely needs wider proposals).
+
+For a tuned starting config on relic-density-only scans, see [`example_mcmc_relic_tuned.yaml`](source/Run3ModelGen/data/configs/example_mcmc_relic_tuned.yaml).
 
 For full details, see [doc/mcmc.md](doc/mcmc.md). For constraint specification, see [doc/constraints.md](doc/constraints.md).
 

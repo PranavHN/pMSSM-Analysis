@@ -1,0 +1,122 @@
+# Tuned MCMC config for the relic-density-only scan.
+#
+# Replaces the previous config which produced split-R̂ ≈ 38 and
+# ESS_bulk ≈ 50 across 410k samples. The proposal widths there were ~0.1 %
+# of each parameter range — chains barely moved.
+#
+# Initial proposal widths (calibrated from a CPU smoke test where adapt
+# discovered the right scale within the first ~1000 proposals):
+#   - M_1, M_2, mu  : ~8 GeV — actual thickness of the relic-density-tight
+#                     isosurface in the LSP-mass directions for the
+#                     `relic_density.uncertainty: 0.012` chi². My earlier
+#                     "well-tempered strip" intuition (50 GeV) was 7× too
+#                     wide; adapt always converged here.
+#   - tanb          : 0.3 — weakly constraining but still tighter than I'd
+#                     guessed (was 2.0).
+#   - At            : 30 — near-nuisance for Ω, but adapt narrows even this.
+#   - Ab, Atau      : 15.
+#   - meL, meR      : 8 — slepton-coannihilation strip thickness.
+#
+# `adapt_proposals` is enabled: Robbins-Monro adaptation toward
+# `target_acceptance: 0.25` during burn-in. Adaptation stops at burn-in end
+# to preserve detailed balance for the post-burn-in samples.
+#
+# Burn-in dropped to 500 (was 5000) because with the tighter starting widths
+# adapt converges in ~10 windows / ~500 proposals; the rest was waste.
+#
+# After running a batch of chains, check convergence with:
+#   python source/Run3ModelGen/scripts/mcmc_diagnostics.py \
+#          --data-dir /path/to/ntuple_dir
+prior: mcmc
+num_models: 10_000
+isGMSB: False
+
+parameters:
+  AT: [-8000, 8000]
+  Ab: [-2000, 2000]
+  Atau: [-2000, 2000]
+  M_1: [-2000, 2000]
+  M_2: [-2000, 2000]
+  M_3: [4000, 4000]
+  mA: [2000, 2000]
+  mbR: [4000, 4000]
+  mdR: [4000, 4000]
+  meL: [0, 2000]
+  meR: [0, 2000]
+  mqL1: [4000, 4000]
+  mqL3: [4000, 4000]
+  mtR: [4000, 4000]
+  mtauL: [2000, 2000]
+  mtauR: [2000, 2000]
+  mu: [-2000, 2000]
+  muR: [4000, 4000]
+  tanb: [1, 60]
+
+mcmc:
+  burn_in: 500                # adapt converges in ~10 windows; 500 is plenty
+  max_attempts: 100_000       # ~14 % effective acceptance × ~77 % valid → 10k commits ≈ 90k proposals
+  accept_invalid: false
+  restart_after: 1000         # gives burn-in 2× headroom before random restart
+
+  # Starting widths calibrated against the CPU smoke test (chain shrunk these
+  # ~7× in adapt). Adapt will refine, but starting close cuts burn-in time.
+  proposal_widths:
+    M_1:    8.0
+    M_2:    8.0
+    mu:     8.0
+    tanb:   0.3
+    AT:    30.0
+    Ab:    15.0
+    Atau:  15.0
+    meL:    8.0
+    meR:    8.0
+
+  # Robbins-Monro adaptation during burn-in. Rescales every `window`
+  # proposals to drive the rolling Metropolis acceptance rate toward
+  # `target_acceptance`. Disabled automatically once burn_in is reached.
+  adapt_proposals:
+    enabled: true
+    target_acceptance: 0.25
+    window: 200
+    learning_rate: 0.05
+
+constraints:
+  - name: relic_density
+    source:
+      step: micromegas
+      file_type: csv
+      variable: Omega
+    type: gaussian
+    central: 0.120
+    uncertainty: 0.012
+
+steps:
+  - name: prep_input
+    output_dir: input
+    prefix: IN
+  - name: SPheno
+    input_dir: input
+    output_dir: SPheno
+    log_dir: SPheno_log
+    prefix: SP
+  - name: softsusy
+    input_dir: input
+    output_dir: softsusy
+    prefix: SS
+  - name: micromegas
+    input_dir: SPheno
+    output_dir: micromegas
+    prefix: MO
+  - name: superiso
+    input_dir: SPheno
+    output_dir: superiso
+    prefix: SI
+  - name: gm2calc
+    input_dir: SPheno
+    output_dir: gm2calc
+    prefix: GM2
+  - name: feynhiggs
+    input_dir: SPheno
+    output_dir: feynhiggs
+    log_dir: feynhiggs_log
+    prefix: FH
