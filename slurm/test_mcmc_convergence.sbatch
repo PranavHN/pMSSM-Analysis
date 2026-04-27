@@ -22,7 +22,7 @@
 #SBATCH --time=01:30:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=8
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=1   # SPheno + micromegas are single-threaded; QOS caps total CPUs at 16 on interactive
 #SBATCH --mem=24G    # `interactive` caps MaxMemPerNode at 32 GB; 24 GB ≫ enough for 8× SPheno + micromegas
 #SBATCH --output=logs/mcmc_test_%j.out
 #SBATCH --error=logs/mcmc_test_%j.err
