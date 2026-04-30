@@ -547,7 +547,8 @@ gm2calc_blocks = {
 }
 
 PDG={
-    2: "d",
+    1: "d",
+    2: "u",
     3: "s",
     4: "c",
     5: "b",
@@ -826,12 +827,24 @@ def readModel(inputDefinitions: list[tuple], num: int, scanDir: str, outName: st
             
             # save theory prediction & (exp) UL:
             try:
-                for res in smodels_dict['smodelsOutput']['ExptRes']:
+                expt_results = smodels_dict['smodelsOutput']['ExptRes']
+                for res in expt_results:
                     AnalysisID = res['AnalysisID'].replace("-", "_")
 
                     data[f"{prefix}{AnalysisID}_TheoryPrediction"] = res['theory prediction (fb)']
                     data[f"{prefix}{AnalysisID}_UpperLimit"] = res['upper limit (fb)']
                     data[f"{prefix}{AnalysisID}_ExpUpperLimit"] = res['expected upper limit (fb)']
+
+                # Analysis with the lowest expected upper limit (most sensitive):
+                best_res = min(
+                    (r for r in expt_results if r['expected upper limit (fb)'] is not None),
+                    key=lambda r: r['expected upper limit (fb)'],
+                    default=None
+                )
+                if best_res is not None:
+                    data[f"{prefix}bestExpUL_TheoryPrediction"] = best_res['theory prediction (fb)']
+                    data[f"{prefix}bestExpUL_UpperLimit"]        = best_res['upper limit (fb)']
+                    data[f"{prefix}bestExpUL_ExpUpperLimit"]     = best_res['expected upper limit (fb)']
             except: pass
             
         else:
