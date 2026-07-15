@@ -5,3 +5,6 @@ run
 *.egg-info
 official311.pcl
 https___smodels_github_io_database_official311
+# Python bytecode
+__pycache__/
+*.py[cod]
