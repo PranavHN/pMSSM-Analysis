@@ -9,6 +9,10 @@ platforms = ["linux-64"]
 
 [tasks]
 
+# Manual escape hatch to repair/build SModelS's bundled pythia8. Normally this runs
+# automatically as part of the CMake build (see source/CMakeLists.txt setup_pythia8).
+setup-pythia8 = "bash source/Run3ModelGen/scripts/setup_pythia8.sh"
+
 build = """
 cmake -S source -B build && \
 cmake \

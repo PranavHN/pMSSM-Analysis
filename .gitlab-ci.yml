@@ -32,6 +32,11 @@ variables:
 .setup_docker:
   before_script:
     - . ~/.bashrc
+    # Ensure SModelS's bundled pythia8 is built in the env `pixi run` will use.
+    # (`. ~/.bashrc` sources build/setup.sh without the pixi env active, so its
+    # pythia8 hook can't import smodels and skips — run it through `pixi run` here,
+    # the same env activation used by `pixi run genModels.py` below. Idempotent.)
+    - pixi run bash source/Run3ModelGen/scripts/setup_pythia8.sh || echo "[ci] pythia8 setup warning; the SModelS step may fail"
     - mkdir -p run
 
 # ---------------------------------------------------------------------------

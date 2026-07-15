@@ -131,6 +131,20 @@ ExternalProject_Add( micromegas
 #     INSTALL_COMMAND ""
 # )
 
+# Repair/build SModelS's bundled pythia8 (works around SModelS's broken pythia8
+# auto-download; see source/Run3ModelGen/scripts/setup_pythia8.sh). ALL so it runs
+# on a plain `cmake --build build` / `pixi run build`; the script is idempotent.
+# Best-effort: pythia8 is only needed at *run* time (the SModelS step), so a failed
+# pre-build (e.g. on a memory-limited CI runner) must NOT fail the whole build — it
+# warns and SModelS falls back to building pythia8 on first use.
+add_custom_target( setup_pythia8 ALL
+    COMMENT "Repairing/building SModelS bundled pythia8 (best-effort)"
+    COMMAND bash -c "${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/setup_pythia8.sh || echo '[setup_pythia8] WARNING: build-time pre-build failed; SModelS will build pythia8 at first use'"
+)
+# Run after the HEP tools so it never competes with them for memory during a
+# parallel `cmake --build` (the concurrent compiles were OOMing CI).
+add_dependencies( setup_pythia8 softsusy superiso feynhiggs gm2calc micromegas )
+
 # Add shell script to place all relevant files in build
 add_custom_target( Run3ModelGen
     COMMENT "Building Run3ModelGen"
