@@ -61,3 +61,12 @@ echo '  export SMODELS_CACHEDIR="/eos/user/'$(whoami | head -c 1)/$(whoami)'/Run
 echo 'else' >> $build_dir/setup.sh >> $build_dir/setup.sh
 echo '  export SMODELS_CACHEDIR="'${source_dir%source}'"' >> $build_dir/setup.sh
 echo 'fi' >> $build_dir/setup.sh >> $build_dir/setup.sh
+
+# Ensure SModelS's bundled pythia8 is built. This runs on every `source build/setup.sh`,
+# so it also covers jobs that start from a fresh pixi env where the build-time pre-build
+# didn't persist (e.g. CI genModels jobs re-create the env via `pixi shell-hook`, and
+# only `build/` — not `.pixi/` — is passed between CI stages). Idempotent: a ~0.4s no-op
+# once pythia8 is built. Run as a subshell (not sourced) so its exit can't kill the
+# sourcing shell, and non-fatal so sourcing setup.sh never breaks.
+echo '# Ensure SModelS pythia8 is built (idempotent; workaround for broken auto-download)' >> $build_dir/setup.sh
+echo 'bash "'${source_dir}'/Run3ModelGen/scripts/setup_pythia8.sh" || echo "[setup.sh] WARNING: pythia8 setup failed; the SModelS step may not run"' >> $build_dir/setup.sh
