@@ -18,83 +18,6 @@ configure_file(
 
 # Add ExternalProjects for tools that run out-of-the-box
 
-# Add softsusy as ExternalProject
-ExternalProject_Add( softsusy
-    PREFIX softsusy-4.1.22
-    URL https://raw.githubusercontent.com/BAllanach/softsusy/master/tags/softsusy-4.1.22.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP NEW
-    UPDATE_COMMAND ""
-    CONFIGURE_COMMAND <SOURCE_DIR>/configure
-    BUILD_COMMAND ${CMAKE_COMMAND} -E env "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}" ${CMAKE_MAKE_PROGRAM}
-    INSTALL_COMMAND ""
-)
-
-# Add superiso as ExternalProject
-ExternalProject_Add( superiso
-    PREFIX superiso_v5.0
-    URL "${CMAKE_SOURCE_DIR}/superiso_v5.0.tgz"
-    DOWNLOAD_EXTRACT_TIMESTAMP NEW
-    CMAKE_ARGS -j1
-    UPDATE_COMMAND ""
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ${CMAKE_MAKE_PROGRAM} && ${CMAKE_MAKE_PROGRAM} slha
-    INSTALL_COMMAND ""
-    BUILD_IN_SOURCE 1
-)
-
-# Add FeynHiggs as ExternalProject
-# Use pixi compilers from conda-forge with minimal flags to avoid segfaults
-ExternalProject_Add( feynhiggs
-    PREFIX FeynHiggs-2.19.0
-    URL https://wwwth.mpp.mpg.de/members/heinemey/feynhiggs/newversion/FeynHiggs-2.19.0.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP NEW
-    UPDATE_COMMAND ""
-    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env
-        --unset=CFLAGS
-        --unset=CXXFLAGS
-        --unset=CPPFLAGS
-        --unset=FFLAGS
-        --unset=LDFLAGS
-        --unset=DEBUG_CFLAGS
-        --unset=DEBUG_CXXFLAGS
-        --unset=DEBUG_CPPFLAGS
-        "CFLAGS=-O2"
-        "CXXFLAGS=-O2"
-        <SOURCE_DIR>/configure
-    BUILD_COMMAND ${CMAKE_COMMAND} -E env
-        --unset=CFLAGS
-        --unset=CXXFLAGS
-        --unset=CPPFLAGS
-        --unset=FFLAGS
-        --unset=LDFLAGS
-        --unset=DEBUG_CFLAGS
-        --unset=DEBUG_CXXFLAGS
-        --unset=DEBUG_CPPFLAGS
-        "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-        ${CMAKE_MAKE_PROGRAM}
-    INSTALL_COMMAND ${CMAKE_COMMAND} -E env
-        --unset=CFLAGS
-        --unset=CXXFLAGS
-        --unset=CPPFLAGS
-        --unset=FFLAGS
-        --unset=LDFLAGS
-        --unset=DEBUG_CFLAGS
-        --unset=DEBUG_CXXFLAGS
-        --unset=DEBUG_CPPFLAGS
-        "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-        ${CMAKE_MAKE_PROGRAM} install
-)
-
-# Add GM2Calc as ExternalProject
-ExternalProject_Add( gm2calc
-    PREFIX GM2Calc-2.3.1
-    URL https://github.com/GM2Calc/GM2Calc/archive/v2.3.1.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP NEW
-    UPDATE_COMMAND ""
-    BUILD_COMMAND ${CMAKE_COMMAND} -E env "CMAKE_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}" ${CMAKE_MAKE_PROGRAM}
-    INSTALL_COMMAND ""
-)
-
 # Add micromegas as ExternalProject
 ExternalProject_Add( micromegas
     PREFIX micromegas_5.2.1
@@ -141,9 +64,9 @@ add_custom_target( setup_pythia8 ALL
     COMMENT "Repairing/building SModelS bundled pythia8 (best-effort)"
     COMMAND bash -c "${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/setup_pythia8.sh || echo '[setup_pythia8] WARNING: build-time pre-build failed; SModelS will build pythia8 at first use'"
 )
-# Run after the HEP tools so it never competes with them for memory during a
-# parallel `cmake --build` (the concurrent compiles were OOMing CI).
-add_dependencies( setup_pythia8 softsusy superiso feynhiggs gm2calc micromegas )
+# Run after micromegas (the only remaining source-built tool; the others now come
+# from conda-forge) so it doesn't compete for memory during a parallel `cmake --build`.
+add_dependencies( setup_pythia8 micromegas )
 
 # Add shell script to place all relevant files in build
 add_custom_target( Run3ModelGen

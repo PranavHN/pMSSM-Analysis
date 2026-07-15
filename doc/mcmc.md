@@ -51,6 +51,7 @@ mcmc:
 | `max_attempts` | `10000` | Maximum total proposals (including burn-in). The run stops when either `num_models` are collected or this limit is reached. |
 | `accept_invalid` | `false` | If `false`, models where the pipeline failed (chi2 = 10^6) are used for chain movement but not saved. If `true`, they are saved like any other accepted model. |
 | `proposal_widths` | `{}` | Per-parameter Gaussian standard deviations. Parameters not listed default to 5% of their range. |
+| `restart_after` | `null` | If set, restart burn-in from a fresh random point after this many consecutive attempts without finishing burn-in. Guards against a chain stuck in a bad region. `null` disables restarts (only applies during burn-in). |
 
 ### Proposal widths
 
