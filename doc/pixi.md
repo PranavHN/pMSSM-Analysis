@@ -53,7 +53,7 @@ This is the environment you use for day-to-day development and model generation.
 
 ### `rootenv` environment
 
-The `rootenv` environment is a lightweight, standalone environment containing only Python 3.11 and ROOT (>= 6.30). It is defined with `no-default-feature = true`, meaning it does **not** inherit any packages from the default environment (no compilers, no physics tools).
+The `rootenv` environment is a lightweight, standalone environment containing only Python 3.11 and ROOT (>= 6.40, via `root_base`). It is defined with `no-default-feature = true`, meaning it does **not** inherit any packages from the default environment (no compilers, no physics tools).
 
 ```bash
 pixi shell -e rootenv     # Enter the ROOT environment
@@ -71,7 +71,7 @@ This separation keeps the ROOT environment fast to resolve and avoids potential 
 ```toml
 [feature.rootenv.dependencies]
 python = "3.11.*"
-root = ">=6.30"
+root_base = ">=6.40.0,<7"
 
 [environments]
 rootenv = { features = ["rootenv"], no-default-feature = true }
@@ -92,6 +92,7 @@ pixi tasks provide reproducible, single-command workflows. They are defined in `
 | `extractModels` | `pixi run extractModels` | Sources the build environment and runs `extractModels.py` with default arguments. |
 | `clean` | `pixi run clean` | Removes the `build/` and `run/` directories. |
 | `genModels-clean` | `pixi run genModels-clean` | Runs `clean`, `build`, and `genModels` in sequence (full rebuild + generate). |
+| `setup-pythia8` | `pixi run setup-pythia8` | Repairs/builds SModelS's bundled pythia8 (see [pythia8.md](pythia8.md)). Normally runs automatically during the build and on `source build/setup.sh`. |
 
 ### Platform-specific overrides
 
@@ -159,7 +160,7 @@ pixi list -e rootenv         # List packages in rootenv
 | C++ libraries | `boost`, `eigen`, `libconfig` (Linux only) |
 | Python | `python 3.11` |
 | Python packages | `pyyaml`, `pyslha`, `uproot`, `pandas`, `scipy`, `click`, `rich`, `structlog`, `colorama`, `ipykernel` |
-| Physics | `spheno-atlas`, `smodels` |
+| Physics | `spheno-atlas`, `softsusy`, `superiso`, `feynhiggs`, `gm2calc-python`, `smodels` |
 | Utilities | `which`, `git` |
 
 **rootenv environment:**
@@ -167,7 +168,7 @@ pixi list -e rootenv         # List packages in rootenv
 | Package | Version |
 | --- | --- |
 | `python` | 3.11.* |
-| `root` | >= 6.30 |
+| `root_base` | >= 6.40.0 |
 
 ## Channels
 

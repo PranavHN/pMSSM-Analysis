@@ -42,6 +42,7 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 | SuperIso | 5.0 | Flavor physics observables (B-physics, rare decays) |
 | GM2Calc | 2.3.1 | Muon anomalous magnetic moment (g-2) calculation |
 | micrOMEGAs | 5.2.1 | Dark matter relic density and direct/indirect detection. Upgrading to version 6.3.0 requires re-generating patch files. See: https://gitlab.cern.ch/jwuerzin/Run3ModelGen/-/issues/15 |
+| SModelS | 3.1.1 | LHC SUSY-search reinterpretation / cross-section upper limits. Uses a bundled pythia8 for LO cross sections (built automatically, see [doc/pythia8.md](doc/pythia8.md)) |
 | EVADE | - | Direct detection constraints (currently unavailable). Version 0.2.0 broke after a recent update to HOM4PS and will remain unavailable for the time being. |
 
 ## Functionalities
@@ -69,7 +70,13 @@ This repo uses [pixi](https://pixi.sh/latest/) to manage packages, compilers, et
 
 ```bash
 curl -fsSL https://pixi.sh/install.sh | bash
-. ~/.bash_profile 
+. ~/.bash_profile
+```
+
+or if you are working on a CVMFS-enabled machine you can setup the latest Pixi release with
+
+```
+. /cvmfs/cms-griddata.cern.ch/cat/sw/pixi/latest/setup.sh
 ```
 
 Please note that since pixi edits your `.bash_profile` automatically, it should be set up correctly on your next login.
@@ -91,7 +98,7 @@ The project provides two pixi environments:
 
 **Default environment** — contains the full build toolchain (compilers, cmake), all Python dependencies, and the external physics software. This is what you use for building and running scans. ROOT ntuples are produced and read using [uproot](https://uproot.readthedocs.io/), a pure-Python library for ROOT file I/O that does **not** require a ROOT installation. uproot is included in the default environment automatically.
 
-**`rootenv` environment** — a lightweight, standalone environment containing only Python 3.11 and [ROOT](https://root.cern/) (>= 6.30). It does **not** include the build toolchain or any physics software. Use this for tasks that require the full ROOT framework (TBrowser, RDataFrame, PyROOT, ROOT macros, etc.):
+**`rootenv` environment** — a lightweight, standalone environment containing only Python 3.11 and [ROOT](https://root.cern/) (>= 6.40.0, via `root_base`). It does **not** include the build toolchain or any physics software. Use this for tasks that require the full ROOT framework (TBrowser, RDataFrame, PyROOT, ROOT macros, etc.):
 
 ```bash
 pixi shell -e rootenv                    # Enter the ROOT environment
@@ -320,7 +327,7 @@ extractModels.py --scan_dir /eos/user/j/jwuerzin/Run3ModelGen/15280231/0/scan.15
 
 For larger scans, parallel jobs can be submitted with [genModels_condor.py](source/Run3ModelGen/scripts/genModels_condor.py):
 ```bash
-genModels_condor.py --config_file myconfig.yaml --condor_dir condorlogdir --num_jobs 42 
+genModels_condor.py --config_file myconfig.yaml --condor_dir condorlogdir --num_jobs 42
 ```
 
 This will automatically submit `num_jobs` to the HTCondor batch system, while storing the relevant outputs in `condorlogdir`. Please note that since each config file contains `num_models` models, this will overall result in `num_jobs` x `num_models` attempted models.
@@ -348,10 +355,8 @@ Detailed documentation is available in the [doc/](doc/) directory:
 - [doc/constraints.md](doc/constraints.md) - Physics constraints specification (types, sources, examples)
 - [doc/configs.md](doc/configs.md) - Configuration system, prior types, and `genConfig.py` usage
 - [doc/pixi.md](doc/pixi.md) - pixi package manager: environments, tasks, dependencies
-- [doc/spheno_build.md](doc/spheno_build.md) - SPheno build notes
-- [doc/softsusy_build.md](doc/softsusy_build.md) - Softsusy build notes
 - [doc/micromegas_build.md](doc/micromegas_build.md) - micrOMEGAs build notes
-- [doc/superiso_build.md](doc/superiso_build.md) - SuperIso build notes
+- [doc/pythia8.md](doc/pythia8.md) - SModelS pythia8 auto-build (workaround for broken upstream download)
 
 # FAQ
 
@@ -359,11 +364,10 @@ More will follow soon. In the meantime, if you have any questions at all, please
 
 ## Adding software/updating the software version
 
-Unfortunately, most software included here uses in-source-builds exclusively. I have taken notes on how I added the different software in this cmake workflow in:
-- [doc/spheno_build](doc/spheno_build.md)
-- [doc/softsusy_build](doc/softsusy_build.md)
+Most external tools are provided as [conda-forge](https://conda-forge.org/) packages; to change a version, edit its constraint in `pixi.toml` (see [doc/pixi.md](doc/pixi.md)). The only tool still built from source in this cmake workflow is micrOMEGAs — see:
 - [doc/micromegas_build](doc/micromegas_build.md)
-- [doc/superiso_build](doc/superiso_build.md)
+
+SModelS's bundled pythia8 is also built automatically at build time (working around a broken upstream download); see [doc/pythia8.md](doc/pythia8.md).
 
 ## Fixing the parameter points
 
@@ -399,7 +403,7 @@ The [cmake_build_env.sh](source/cmake_build_env.sh) script is automatically call
 - Sets up symbolic links for Python modules from `source/Run3ModelGen/python/` to `build/Run3ModelGen/`
 - Creates the EOS output directory at `/eos/user/<initial>/<username>/Run3ModelGen`
 - Generates the `build/setup.sh` file with all necessary environment variables:
-  - `PATH`: Adds all external software binaries (SPheno, softsusy, micromegas, etc.) and Run3ModelGen scripts
+  - `PATH`: Adds the micrOMEGAs binary and the Run3ModelGen scripts (the other physics tools come from their conda-forge packages in the pixi environment)
   - `PYTHONPATH`: Adds the build directory for Python module imports
   - `DATAPATH`: Points to the Run3ModelGen data directory
   - `EOSPATH`: Points to your EOS output directory
