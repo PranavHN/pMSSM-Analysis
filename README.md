@@ -358,6 +358,36 @@ Detailed documentation is available in the [doc/](doc/) directory:
 - [doc/micromegas_build.md](doc/micromegas_build.md) - micrOMEGAs build notes
 - [doc/pythia8.md](doc/pythia8.md) - SModelS pythia8 auto-build (workaround for broken upstream download)
 
+# Reference files & CI regression check
+
+Each CI `genModels` job compares the **per-step success counts** of its scan against a
+reference stored on EOS and fails on a mismatch. The references are (re)generated with two
+**manual** pixi tasks (never run automatically in CI) — produce first, review, then upload:
+
+```bash
+# 1. produce the reference scans and print their per-step summary (no upload, no credentials)
+pixi run make-refs
+
+# 2. once you're happy with the summary, upload the references to EOS
+export CERN_USER=nicebot                                                # the service account
+export SERVICE_PASS="$(printf %s 'THE_NICEBOT_PASSWORD' | base64 -w0)"  # BASE64 of the password (never commit it)
+pixi run upload-refs
+```
+
+`make-refs` runs all 5 CI scans and prints their per-step success counts, leaving the ntuples
+under `run/scan_<name>/` (no credentials needed). `upload-refs` then uploads, per scan,
+`ntuple_<scan>.root` and a `counts_<scan>.json` sidecar to
+`root://eosuser.cern.ch//eos/user/n/nicebot/Run3ModelGen/` (the CI jobs download the sidecar
+via `compare_reference.py` and compare). It reads the credentials from the environment,
+`kinit`s into a private credential cache destroyed on exit (so it neither prints the password
+nor overwrites your own ticket), and errors clearly if a reference is missing or the variables
+are unset/invalid. Both tasks accept `--scans flat,mcmc` to act on a subset.
+
+**Prerequisites for the CI check to pass:** set the masked CI variables `SERVICE_PASS`
+(base64 of the `nicebot` password) and `CERN_USER` (`nicebot`), and run `make-refs` then
+`upload-refs` once to seed the references. Until then the comparison jobs fail with a clear
+"reference not found" message.
+
 # FAQ
 
 More will follow soon. In the meantime, if you have any questions at all, please contact jonas.wuerzinger@cern.ch.

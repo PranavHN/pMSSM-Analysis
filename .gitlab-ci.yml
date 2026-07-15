@@ -39,6 +39,23 @@ variables:
     - pixi run bash source/Run3ModelGen/scripts/setup_pythia8.sh || echo "[ci] pythia8 setup warning; the SModelS step may fail"
     - mkdir -p run
 
+# genModels jobs additionally kinit so they can xrdcp the reference ntuple counts
+# from EOS for the per-step regression check (compare_reference.py). `extends`
+# REPLACES before_script, so re-reference the base setup and append the kinit line.
+# SERVICE_PASS (base64 of the nicebot password) and CERN_USER (=nicebot) are masked
+# CI variables. (extractModels/publish don't read EOS, so they keep the base setup.)
+.genmodels_local:
+  extends: .setup_local
+  before_script:
+    - !reference [.setup_local, before_script]
+    - printf "%s" "$SERVICE_PASS" | base64 -d | kinit "$CERN_USER@CERN.CH"
+
+.genmodels_docker:
+  extends: .setup_docker
+  before_script:
+    - !reference [.setup_docker, before_script]
+    - printf "%s" "$SERVICE_PASS" | base64 -d | pixi run kinit "$CERN_USER@CERN.CH"
+
 # ---------------------------------------------------------------------------
 # Build stage
 # ---------------------------------------------------------------------------
@@ -89,25 +106,27 @@ build_docker:
 # ---------------------------------------------------------------------------
 
 genModels_flat_local:
-  extends: .setup_local
+  extends: .genmodels_local
   stage: genModels
   needs: [build_local]
   script:
     - cd run
     - genModels.py --scan_dir scan_flat
+    - compare_reference.py --scan flat
   artifacts:
     paths:
       - run/scan_flat
     expire_in: 1 day
 
 genModels_flat_docker:
-  extends: .setup_docker
+  extends: .genmodels_docker
   stage: genModels
   needs: [build_docker]
   image: ${CI_IMAGE}
   script:
     - cd run
     - pixi run genModels.py --scan_dir scan_flat
+    - pixi run compare_reference.py --scan flat
   artifacts:
     paths:
       - run/scan_flat
@@ -118,25 +137,27 @@ genModels_flat_docker:
 # ---------------------------------------------------------------------------
 
 genModels_fixed_local:
-  extends: .setup_local
+  extends: .genmodels_local
   stage: genModels
   needs: [build_local]
   script:
     - cd run
     - genModels.py --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --scan_dir scan_fixed
+    - compare_reference.py --scan fixed
   artifacts:
     paths:
       - run/scan_fixed
     expire_in: 1 day
 
 genModels_fixed_docker:
-  extends: .setup_docker
+  extends: .genmodels_docker
   stage: genModels
   needs: [build_docker]
   image: ${CI_IMAGE}
   script:
     - cd run
     - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --scan_dir scan_fixed
+    - pixi run compare_reference.py --scan fixed
   artifacts:
     paths:
       - run/scan_fixed
@@ -147,25 +168,27 @@ genModels_fixed_docker:
 # ---------------------------------------------------------------------------
 
 genModels_mcmc_local:
-  extends: .setup_local
+  extends: .genmodels_local
   stage: genModels
   needs: [build_local]
   script:
     - cd run
     - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml --scan_dir scan_mcmc
+    - compare_reference.py --scan mcmc
   artifacts:
     paths:
       - run/scan_mcmc
     expire_in: 1 day
 
 genModels_mcmc_docker:
-  extends: .setup_docker
+  extends: .genmodels_docker
   stage: genModels
   needs: [build_docker]
   image: ${CI_IMAGE}
   script:
     - cd run
     - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml --scan_dir scan_mcmc
+    - pixi run compare_reference.py --scan mcmc
   artifacts:
     paths:
       - run/scan_mcmc
@@ -176,25 +199,27 @@ genModels_mcmc_docker:
 # ---------------------------------------------------------------------------
 
 genModels_grid_local:
-  extends: .setup_local
+  extends: .genmodels_local
   stage: genModels
   needs: [build_local]
   script:
     - cd run
     - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_grid_config.yaml --scan_dir scan_grid
+    - compare_reference.py --scan grid
   artifacts:
     paths:
       - run/scan_grid
     expire_in: 1 day
 
 genModels_grid_docker:
-  extends: .setup_docker
+  extends: .genmodels_docker
   stage: genModels
   needs: [build_docker]
   image: ${CI_IMAGE}
   script:
     - cd run
     - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_grid_config.yaml --scan_dir scan_grid
+    - pixi run compare_reference.py --scan grid
   artifacts:
     paths:
       - run/scan_grid
@@ -205,20 +230,21 @@ genModels_grid_docker:
 # ---------------------------------------------------------------------------
 
 genModels_importance_local:
-  extends: .setup_local
+  extends: .genmodels_local
   stage: genModels
   needs: [build_local]
   script:
     - cd run
     - cp ../source/Run3ModelGen/data/configs/ci_importance_seeds.csv .
     - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_importance_config.yaml --scan_dir scan_importance
+    - compare_reference.py --scan importance
   artifacts:
     paths:
       - run/scan_importance
     expire_in: 1 day
 
 genModels_importance_docker:
-  extends: .setup_docker
+  extends: .genmodels_docker
   stage: genModels
   needs: [build_docker]
   image: ${CI_IMAGE}
@@ -226,6 +252,7 @@ genModels_importance_docker:
     - cd run
     - cp ../source/Run3ModelGen/data/configs/ci_importance_seeds.csv .
     - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_importance_config.yaml --scan_dir scan_importance
+    - pixi run compare_reference.py --scan importance
   artifacts:
     paths:
       - run/scan_importance
