@@ -43,6 +43,29 @@ rm -rf run
 
 genModels-clean = { depends-on = ["clean", "build", "genModels"] }
 
+# Manual, two steps. `pixi run make-refs` produces the reference scans for all CI
+# scan settings and prints their per-step success counts (no upload, no credentials
+# needed). Review the summary, then `pixi run upload-refs` uploads the references.
+# Neither runs automatically in CI (the CI genModels jobs only compare against the
+# uploaded references).
+make-refs = """
+bash -c '\
+. build/setup.sh && \
+mkdir -p run && \
+make_references.py'
+"""
+
+# Upload the references produced by `make-refs` (ntuple + counts JSON) to the shared
+# nicebot EOS area. Export SERVICE_PASS (base64 of the nicebot password) and
+# CERN_USER (=nicebot) first; upload_references.py kinit's into a private,
+# auto-destroyed credential cache (in a new session so it reads the password from
+# stdin, not the terminal) and errors clearly if they're missing/invalid.
+upload-refs = """
+bash -c '\
+. build/setup.sh && \
+upload_references.py'
+"""
+
 [target.linux-64.tasks]
 # Use nproc as available
 build = """
@@ -80,6 +103,7 @@ softsusy = ">=4.1.22,<5"
 superiso = ">=5.0,<6"
 feynhiggs = ">=2.19.0,<3"
 gm2calc-python = ">=2.3.1,<3"
+xrootd = ">=5.6,<7"  # provides the xrdcp client for uploading/downloading EOS reference files
 
 [target.linux-64.dependencies]
 gcc = ">=13.2.0,<13.3"
