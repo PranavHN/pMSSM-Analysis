@@ -4,9 +4,6 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 
 # Table of Contents <!-- omit in toc -->
 
-- [Targets](#targets)
-  - [Software content](#software-content)
-  - [Functionalities](#functionalities)
 - [Installation](#installation)
   - [pixi](#pixi)
   - [Run3ModelGen](#run3modelgen)
@@ -16,6 +13,7 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
   - [Sampling priors](#sampling-priors)
   - [Changing the scan configuration](#changing-the-scan-configuration)
   - [MCMC sampling](#mcmc-sampling)
+    - [Diagnostics](#diagnostics)
   - [Grid sampling](#grid-sampling)
   - [Importance sampling](#importance-sampling)
   - [Extracting interesting models](#extracting-interesting-models)
@@ -25,11 +23,12 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
     - [Generating models](#generating-models)
     - [Extracting models](#extracting-models)
 - [Documentation](#documentation)
+- [Reference files \& CI regression check](#reference-files--ci-regression-check)
 - [FAQ](#faq)
   - [Adding software/updating the software version](#adding-softwareupdating-the-software-version)
   - [Fixing the parameter points](#fixing-the-parameter-points)
   - [Gaps in the scan ranges](#gaps-in-the-scan-ranges)
-  - [cmake_build_env.sh](#cmake_build_envsh)
+  - [cmake\_build\_env.sh](#cmake_build_envsh)
   - [pixi](#pixi-1)
 
 ## Software content
@@ -44,23 +43,6 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 | micrOMEGAs | 5.2.1 | Dark matter relic density and direct/indirect detection. Upgrading to version 6.3.0 requires re-generating patch files. See: https://gitlab.cern.ch/jwuerzin/Run3ModelGen/-/issues/15 |
 | SModelS | 3.1.1 | LHC SUSY-search reinterpretation / cross-section upper limits. Uses a bundled pythia8 for LO cross sections (built automatically, see [doc/pythia8.md](doc/pythia8.md)) |
 | EVADE | - | Direct detection constraints (currently unavailable). Version 0.2.0 broke after a recent update to HOM4PS and will remain unavailable for the time being. |
-
-## Functionalities
-
-- [x] Script to run flat scan & save output models
-- [x] MCMC sampling with physics-based constraints
-- [x] Grid sampling with Cartesian product over parameter values
-- [x] Importance sampling by perturbing known viable seed models
-- [x] Config file management with `genConfig.py`
-- [x] Docker images of framework
-- [x] Ntuple making
-  - [x] Add ability to specify steps and their outputs diverging from defaults.
-- [x] Model selection for factory
-- [x] HTCondor support for larger parallel scans (using Docker?!)
-- [ ] Support for non-alma9 machines (e.g. MacOS)
-- [ ] Add support for re-running individual steps
-- [ ] Add support for generating additional models to existing scan
-- [x] Improve movemodels .tar ball handling
 
 # Installation
 
@@ -351,6 +333,7 @@ The HTCondor job flavour can be changed using the `--flavour` flag.
 
 Detailed documentation is available in the [doc/](doc/) directory:
 
+- [doc/ntuple.md](doc/ntuple.md) - NTuple structure: tree layout, branch naming, and per-tool branch groups
 - [doc/mcmc.md](doc/mcmc.md) - MCMC sampling algorithm, configuration, and output
 - [doc/constraints.md](doc/constraints.md) - Physics constraints specification (types, sources, examples)
 - [doc/configs.md](doc/configs.md) - Configuration system, prior types, and `genConfig.py` usage
