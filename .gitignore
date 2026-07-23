@@ -5,6 +5,9 @@ run
 *.egg-info
 official311.pcl
 https___smodels_github_io_database_official311
+# Prefetched caches routed here in CI (see .gitlab-ci.yml / setup_*.sh)
+.smodels-cache/
+.pythia8-cache/
 # Python bytecode
 __pycache__/
 *.py[cod]
