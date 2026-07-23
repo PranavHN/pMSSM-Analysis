@@ -6,6 +6,7 @@ import copy
 import os
 import pyslha
 import numpy as np
+from collections import Counter
 
 import structlog
 log = structlog.get_logger()
@@ -738,10 +739,17 @@ def readSLHA(name: str, data: dict, prefix: str, blocks: dict, decays: dict, nee
         BFs=[0]*(len(decay)+1)
         for sDecay in slha.decays:
             idx=0
-            ids=set([abs(id) for id in sDecay.ids])
+            # Use multisets (Counter) rather than plain sets so daughter-particle
+            # multiplicity is respected. With plain sets, a channel like (N1, N1)
+            # collapses to {N1} and would match an N1 N2 final state (since {N1} is a
+            # subset of {N1, N2}), so e.g. BF(h -> N1 N2) would be wrongly summed into
+            # the h -> N1 N1 bin. Multiset containment (every daughter in `mm` must
+            # appear in the decay with at least the same multiplicity) fixes this while
+            # preserving the intended partial/catch-all channels such as (1000022,).
+            ids=Counter(abs(id) for id in sDecay.ids)
             for mm in decay:
-                match=set(mm)
-                if match.issubset(ids): break
+                match=Counter(mm)
+                if not (match - ids): break
                 idx+=1
             BFs[idx]+=sDecay.br
         for idx in range(len(decay)):
