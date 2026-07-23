@@ -60,7 +60,23 @@ class ModelGenerator:
         for key, value in config_dict.items():
             if key not in default_keys:
                 setattr(self, key, value)
-        
+
+        # Drop pipeline steps whose external tool is not installed on this platform.
+        # In particular FeynHiggs is not packaged on conda-forge for macOS, so on that
+        # platform the 'feynhiggs' step is silently removed rather than failing every
+        # model (and thereby skipping all downstream steps). On Linux, where FeynHiggs
+        # is installed, this is a no-op.
+        step_executables = {'feynhiggs': 'FeynHiggs'}
+        available_steps = []
+        for step in getattr(self, 'steps', []):
+            exe = step_executables.get(step['name'])
+            if exe is not None and shutil.which(exe) is None:
+                log.warning(f"Skipping step '{step['name']}': required executable "
+                            f"'{exe}' not found on PATH (not available on this platform).")
+                continue
+            available_steps.append(step)
+        self.steps = available_steps
+
         # Check if too many models supplied
         if self.num_models > 10000:
             log.fatal(f"num_models too large! Please reduce to max 10,000 and split into multiple jobs using genModels_condor.py!")

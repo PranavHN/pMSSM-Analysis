@@ -1,22 +1,25 @@
 --- a/CalcHEP_src/getFlags
 +++ b/CalcHEP_src/getFlags
-@@ -47,7 +47,8 @@
+@@ -47,7 +47,11 @@
               CXXFLAGS="-g -fPIC"
               unKnownC=
            else 
 -            CFLAGS="-g -std=gnu99 -fPIC"
 +            # CFLAGS="-g -std=gnu99 -fPIC"
-+            CFLAGS="-g -std=gnu99 -fPIC -fcommon -L@PIXI_LIB_PATH@ -lgfortran -lquadmath"
++            # -fsigned-char: this "unknown compiler" branch is taken by the conda clang
++            # wrapper on macOS (e.g. x86_64-apple-darwin13.4.0-clang); without it CalcHEP's
++            # char-signedness self-test aborts ("C compiler uses unsigned char type").
++            CFLAGS="-g -fsigned-char -std=gnu99 -fPIC -fcommon -L@PIXI_LIB_PATH@ -Wl,-rpath,@PIXI_LIB_PATH@ -lgfortran -lquadmath $($CC --version 2>/dev/null | grep -qi clang && echo '-Wno-error=incompatible-function-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=implicit-int -Wno-error=return-type')"
              CXX=$CC
              CXXFLAGS="-g -fPIC"
              echo Unknown compiler $CC  
-@@ -63,7 +64,8 @@
+@@ -63,7 +67,8 @@
         CXX=g++
         echo   CC=gcc by default
      fi
 -    CFLAGS="-g -fsigned-char -std=gnu99 -fPIC"
 +    # CFLAGS="-g -fsigned-char -std=gnu99 -fPIC"
-+    CFLAGS="-g -fsigned-char -std=gnu99 -fPIC -fcommon -L@PIXI_LIB_PATH@ -lgfortran -lquadmath"
++    CFLAGS="-g -fsigned-char -std=gnu99 -fPIC -fcommon -L@PIXI_LIB_PATH@ -Wl,-rpath,@PIXI_LIB_PATH@ -lgfortran -lquadmath $($CC --version 2>/dev/null | grep -qi clang && echo '-Wno-error=incompatible-function-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=implicit-int -Wno-error=return-type')"
      CXXFLAGS="-g -fPIC"
      unKnownC=
    fi
