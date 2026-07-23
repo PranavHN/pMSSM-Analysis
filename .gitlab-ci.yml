@@ -6,6 +6,20 @@ stages:
 
 variables:
   GIT_SUBMODULE_STRATEGY: recursive
+  # Shared cache for SModelS's compiled pythia8 (see scripts/setup_pythia8.sh).
+  # pythia8 lives inside the pixi env, which is re-created from scratch in every
+  # job, so without this every stage recompiles it. The local track builds it once
+  # in build_local and passes this dir as an artifact; downstream local jobs restore
+  # from it instead of rebuilding. (The docker track overrides this to an image-baked
+  # path in .setup_docker.)
+  PYTHIA8_CACHE_DIR: "$CI_PROJECT_DIR/.pythia8-cache"
+  # Shared cache for SModelS's downloaded results-database pickle (see
+  # scripts/setup_smodels_db.sh). SModelS caches the (hundreds-of-MB) pickle here;
+  # without a persistent, shared location every genModels job re-downloads it. The
+  # build prefetches it into this dir, the local track passes it as an artifact, and
+  # downstream jobs reuse it. (The docker track overrides this to an image-baked
+  # path in .setup_docker.)
+  SMODELS_CACHEDIR: "$CI_PROJECT_DIR/.smodels-cache"
 
 # ---------------------------------------------------------------------------
 # Templates
@@ -30,6 +44,15 @@ variables:
 
 # Docker template: sources ~/.bashrc (which includes pixi + setup.sh)
 .setup_docker:
+  variables:
+    # The image already compiled pythia8 into this stable path (see Dockerfile).
+    # Each docker job runs in a fresh checkout / fresh pixi env, so point the cache
+    # here to restore the baked copy instead of recompiling in every job.
+    PYTHIA8_CACHE_DIR: "/opt/pythia8-cache"
+    # Likewise the SModelS database pickle is prefetched into this stable path in the
+    # image (see Dockerfile); point the cache here so docker jobs reuse it instead of
+    # re-downloading it.
+    SMODELS_CACHEDIR: "/opt/smodels-cache"
   before_script:
     - . ~/.bashrc
     # Ensure SModelS's bundled pythia8 is built in the env `pixi run` will use.
@@ -71,12 +94,17 @@ build_local:
     - pixi run which gcc
     - pixi run which cc
     - pixi run which c++
-    # build project
+    # build project (this also compiles pythia8 and saves it to PYTHIA8_CACHE_DIR)
     - pixi run build
   artifacts:
     expire_in: 1 week
     paths:
       - build/
+      # compiled pythia8, restored by downstream local jobs to skip the rebuild
+      - .pythia8-cache/
+      # prefetched SModelS database pickle, reused by downstream local jobs to skip
+      # the re-download
+      - .smodels-cache/
 
 # Builds and pushes to a temporary CI tag for testing.
 # The final tag is applied by publish_docker after all tests pass.

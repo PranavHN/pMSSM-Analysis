@@ -29,6 +29,52 @@
 #
 set -euo pipefail
 
+# Best-effort mode (used by the CMake build target): pythia8 is only needed at
+# *run* time, so a failed pre-build must NOT abort the whole build. When
+# SETUP_PYTHIA8_BEST_EFFORT is set, turn any nonzero exit into a warning + exit 0
+# and let SModelS build pythia8 on first use. Kept in the script (not as a shell
+# `|| echo` in CMakeLists) because CMake's makefile escaping mangles nested quotes.
+if [[ -n "${SETUP_PYTHIA8_BEST_EFFORT:-}" ]]; then
+  trap 'rc=$?; [[ $rc -eq 0 ]] || echo "[setup_pythia8] WARNING: build-time pre-build failed (exit $rc); SModelS will build pythia8 at first use."; exit 0' EXIT
+fi
+
+# --- shared prebuilt cache (optional) ----------------------------------------
+# The compiled pythia8 lives inside the pixi env (.pixi/.../smodels/lib/pythia8),
+# which is NOT shared between CI stages — each stage re-creates the env and would
+# otherwise recompile pythia8 from scratch. PYTHIA8_CACHE_DIR points at a plain
+# directory that IS carried between stages (a GitLab artifact for the local track,
+# a baked-in image path for the docker track): the first stage that builds pythia8
+# saves the compiled result there, and every later stage restores it instead of
+# rebuilding. Resolve to an absolute path now, before we cd into the env.
+CACHE_DIR="${PYTHIA8_CACHE_DIR:-}"
+if [[ -n "$CACHE_DIR" && "$CACHE_DIR" != /* ]]; then CACHE_DIR="$PWD/$CACHE_DIR"; fi
+
+# is a complete, runnable pythia8 present in directory $1? (uses global $VER)
+pythia8_is_built() { [[ -x "$1/pythia8.exe" && -f "$1/pythia${VER}/lib/libpythia8.a" ]]; }
+
+# copy the freshly built pythia8 into the shared cache (no-op if cache disabled,
+# env not built, or cache already populated) so later stages can restore it.
+save_to_cache() {
+  [[ -n "$CACHE_DIR" ]] || return 0
+  pythia8_is_built "$PYDIR" || return 0
+  pythia8_is_built "$CACHE_DIR" && return 0
+  echo "[setup_pythia8] caching prebuilt pythia8 -> ${CACHE_DIR}"
+  mkdir -p "$CACHE_DIR"
+  cp -a "$PYDIR/pythia8.exe" "$PYDIR/pythia${VER}" "$CACHE_DIR/"
+  return 0
+}
+
+# restore a prebuilt pythia8 from the shared cache into the env. Returns nonzero
+# (so the caller falls through to a normal build) if there is nothing to restore.
+restore_from_cache() {
+  [[ -n "$CACHE_DIR" ]] || return 1
+  pythia8_is_built "$CACHE_DIR" || return 1
+  echo "[setup_pythia8] restoring prebuilt pythia8 from cache ${CACHE_DIR}"
+  rm -rf "$PYDIR/pythia8.exe" "$PYDIR/pythia${VER}"
+  cp -a "$CACHE_DIR/pythia8.exe" "$CACHE_DIR/pythia${VER}" "$PYDIR/"
+  pythia8_is_built "$PYDIR"
+}
+
 # --- locate the installed smodels pythia8 dir --------------------------------
 PYBIN="$(command -v python || command -v python3 || true)"
 [[ -n "$PYBIN" ]] || { echo "[setup_pythia8] no python found; skipping."; exit 0; }
@@ -59,8 +105,15 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 # already built? (re-checked here now that we hold the lock)
-if [[ -x pythia8.exe && -f "pythia${VER}/lib/libpythia8.a" ]]; then
+if pythia8_is_built "$PYDIR"; then
   echo "[setup_pythia8] pythia8 already built in ${PYDIR} — nothing to do."
+  save_to_cache   # populate the shared cache for later stages if not already there
+  exit 0
+fi
+
+# fast path: reuse a copy compiled by an earlier stage instead of rebuilding
+if restore_from_cache; then
+  echo "[setup_pythia8] using restored pythia8 in ${PYDIR} — skipping build."
   exit 0
 fi
 
@@ -114,16 +167,37 @@ if [[ "$mem_gb" -gt 0 ]]; then
   mem_cap=$(( mem_gb / 2 )); [[ "$mem_cap" -lt 1 ]] && mem_cap=1
   [[ "$mem_cap" -lt "$CAP" ]] && CAP="$mem_cap"
 fi
+# Cap installer.py's parallelism by shrinking the CPU-affinity mask it reads
+# (nCPUs() counts the set bits). Pin to the first CAP cpus we're ACTUALLY allowed
+# to run on — on cpuset-restricted nodes (SLURM/condor) the mask can be e.g.
+# "10-35,46-71,..." with no low cores, so a fixed `taskset -c 0-7` fails with
+# "Invalid argument". Best-effort: if taskset can't be built/validated, run
+# without it (installer.py may then use more cores, but still builds).
 TS=""
-if command -v taskset >/dev/null 2>&1 && [[ "$(nproc)" -gt "$CAP" ]]; then
-  TS="taskset -c 0-$((CAP-1))"
+if command -v taskset >/dev/null 2>&1; then
+  allowed="$(taskset -pc $$ 2>/dev/null | sed 's/.*:[[:space:]]*//')"
+  cpus=()
+  IFS=',' read -ra _ranges <<< "${allowed:-}"
+  for _r in "${_ranges[@]}"; do
+    if [[ "$_r" == *-* ]]; then
+      for ((_c=${_r%-*}; _c<=${_r#*-}; _c++)); do cpus+=("$_c"); done
+    elif [[ -n "$_r" ]]; then
+      cpus+=("$_r")
+    fi
+  done
+  if [[ "${#cpus[@]}" -gt "$CAP" ]]; then
+    sel="$(IFS=,; echo "${cpus[*]:0:CAP}")"
+    TS="taskset -c $sel"
+    $TS true 2>/dev/null || TS=""   # validate the pin before trusting the build to it
+  fi
 fi
 echo "[setup_pythia8] compiling with up to ${CAP} cores (mem=${mem_gb}GB)…"
 $TS make -j1 install_pythia8   # installer.py: extract + build libpythia8.a (its own make -j)
 $TS make -j1 pythia8.exe       # then link the driver against the finished library
 
-if [[ -x pythia8.exe && -f "pythia${VER}/lib/libpythia8.a" ]]; then
+if pythia8_is_built "$PYDIR"; then
   echo "[setup_pythia8] SUCCESS: built pythia8.exe and libpythia8.a in ${PYDIR}"
+  save_to_cache   # publish for later CI stages so they can skip the rebuild
 else
   echo "[setup_pythia8] ERROR: build did not produce pythia8.exe / libpythia8.a" >&2
   exit 1

@@ -11,7 +11,15 @@ WORKDIR /workdir/
 # Set default shell to bash
 SHELL ["/bin/bash", "-c"]
 
-# Install Run3ModelGen
+# Install Run3ModelGen. PYTHIA8_CACHE_DIR makes `pixi run build` save the compiled
+# pythia8 to a stable path baked into the image; CI docker jobs (which run in a fresh
+# checkout with a fresh pixi env) restore from it instead of recompiling pythia8 per
+# job (see .setup_docker in .gitlab-ci.yml and scripts/setup_pythia8.sh).
+ENV PYTHIA8_CACHE_DIR=/opt/pythia8-cache
+# SMODELS_CACHEDIR makes `pixi run build` prefetch SModelS's results-database pickle
+# to a stable path baked into the image; CI docker jobs point here (see .setup_docker)
+# to reuse it instead of re-downloading the (hundreds-of-MB) database per job.
+ENV SMODELS_CACHEDIR=/opt/smodels-cache
 RUN curl -fsSL https://pixi.sh/install.sh | bash && \
     . ~/.bash_profile && \
     pwd && \

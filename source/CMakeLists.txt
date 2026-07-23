@@ -75,11 +75,28 @@ ExternalProject_Add( micromegas
 # warns and SModelS falls back to building pythia8 on first use.
 add_custom_target( setup_pythia8 ALL
     COMMENT "Repairing/building SModelS bundled pythia8 (best-effort)"
-    COMMAND bash -c "${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/setup_pythia8.sh || echo '[setup_pythia8] WARNING: build-time pre-build failed; SModelS will build pythia8 at first use'"
+    COMMAND ${CMAKE_COMMAND} -E env SETUP_PYTHIA8_BEST_EFFORT=1
+            bash ${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/setup_pythia8.sh
 )
 # Run after micromegas (the only remaining source-built tool; the others now come
 # from conda-forge) so it doesn't compete for memory during a parallel `cmake --build`.
 add_dependencies( setup_pythia8 micromegas )
+
+# Pre-fetch the SModelS "official" results-database pickle (see
+# source/Run3ModelGen/scripts/setup_smodels_db.sh). Without this, genModels.py's
+# SModelS step re-downloads the (hundreds-of-MB) pickle on first use in every CI
+# job. Downloading it once here — and, in CI, pointing $SMODELS_CACHEDIR at a
+# directory inherited by later jobs (artifact / image-baked; see .gitlab-ci.yml and
+# Dockerfile) — lets downstream jobs reuse it. ALL so it runs on a plain
+# `pixi run build`; idempotent (a no-op once the pickle is cached).
+# Best-effort: the database is only needed at *run* time, so a failed prefetch must
+# NOT fail the build — it warns and SModelS downloads it on first use instead.
+# Network-bound (not CPU/memory), so it needs no ordering vs. the compile targets.
+add_custom_target( setup_smodels_db ALL
+    COMMENT "Pre-fetching SModelS official database (best-effort)"
+    COMMAND ${CMAKE_COMMAND} -E env SETUP_SMODELS_DB_BEST_EFFORT=1
+            bash ${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/setup_smodels_db.sh
+)
 
 # Add shell script to place all relevant files in build
 add_custom_target( Run3ModelGen

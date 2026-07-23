@@ -51,12 +51,19 @@ echo 'export PYTHONPATH="'${build_dir}':$PYTHONPATH"' >> $build_dir/setup.sh
 echo 'export DATAPATH="'${source_dir}/Run3ModelGen/data':$DATAPATH"' >> $build_dir/setup.sh
 echo 'export EOSPATH="/eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen"' >> $build_dir/setup.sh
 echo 'export RUN3MODELGENDIR="'${source_dir%source}'"' >> $build_dir/setup.sh
+# Set SMODELS_CACHEDIR (where SModelS caches its downloaded results-database
+# pickle) — but only if it isn't already set. A pre-set value (e.g. the persistent
+# cache dir CI points every job at, so the database prefetched by the build is
+# reused instead of re-downloaded) must win over these defaults.
 echo '# Check if eos directory is available & set SMODELS_CACHEDIR accordingly' >> $build_dir/setup.sh
-echo 'if [ -d /eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen ]; then' >> $build_dir/setup.sh
-echo '  export SMODELS_CACHEDIR="/eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen"' >> $build_dir/setup.sh
-echo 'else' >> $build_dir/setup.sh >> $build_dir/setup.sh
-echo '  export SMODELS_CACHEDIR="'${source_dir%source}'"' >> $build_dir/setup.sh
-echo 'fi' >> $build_dir/setup.sh >> $build_dir/setup.sh
+echo '# (only if not already set, so a pre-set persistent cache — e.g. in CI — is honoured)' >> $build_dir/setup.sh
+echo 'if [ -z "${SMODELS_CACHEDIR:-}" ]; then' >> $build_dir/setup.sh
+echo '  if [ -d /eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen ]; then' >> $build_dir/setup.sh
+echo '    export SMODELS_CACHEDIR="/eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen"' >> $build_dir/setup.sh
+echo '  else' >> $build_dir/setup.sh
+echo '    export SMODELS_CACHEDIR="'${source_dir%source}'"' >> $build_dir/setup.sh
+echo '  fi' >> $build_dir/setup.sh
+echo 'fi' >> $build_dir/setup.sh
 
 # Ensure SModelS's bundled pythia8 is built. This runs on every `source build/setup.sh`,
 # so it also covers jobs that start from a fresh pixi env where the build-time pre-build
