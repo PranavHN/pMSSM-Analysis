@@ -8,8 +8,17 @@ project( Run3ModelGen )
 
 include( ExternalProject )
 
-# Configure micromegas patches with absolute pixi path
-set(PIXI_LIB_PATH "${CMAKE_SOURCE_DIR}/.pixi/envs/default/lib")
+# Configure micromegas patches with absolute pixi path.
+# Use the active conda/pixi env prefix (set by `pixi run`/`pixi shell`) rather than a
+# path relative to CMAKE_SOURCE_DIR: the env lives at <repo>/.pixi, but CMAKE_SOURCE_DIR
+# is <repo>/source (cmake -S source), so a "${CMAKE_SOURCE_DIR}/.pixi" path is wrong.
+# On Linux the conda gcc wrapper puts the env lib on LIBRARY_PATH so the bad -L was
+# harmless; on macOS clang does not, so -lgfortran/-lquadmath failed to link.
+if(DEFINED ENV{CONDA_PREFIX})
+    set(PIXI_LIB_PATH "$ENV{CONDA_PREFIX}/lib")
+else()
+    set(PIXI_LIB_PATH "${CMAKE_SOURCE_DIR}/../.pixi/envs/default/lib")
+endif()
 configure_file(
     ${CMAKE_SOURCE_DIR}/patches/micromegas/001-calchep-compiler-flags.patch.in
     ${CMAKE_BINARY_DIR}/patches/001-calchep-compiler-flags.patch
@@ -40,7 +49,11 @@ ExternalProject_Add( micromegas
         COMMAND ${CMAKE_MAKE_PROGRAM} -C <SOURCE_DIR>/MSSM -j1
 
     BUILD_IN_SOURCE 1
-    INSTALL_COMMAND ""
+
+    # macOS: micromegas links MSSM/main against a relative dylib path ("../lib/maxGap.so"),
+    # which dyld cannot resolve when `main` runs from the scan directory. Rewrite the
+    # install names to absolute paths. The helper is a no-op on non-Darwin platforms.
+    INSTALL_COMMAND bash ${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/fix_micromegas_install_names.sh <SOURCE_DIR>
 )
 
 # # Add EVADE as ExternalProject - DISABLED; PROBABLY PERMANENTLY BROKEN!
