@@ -27,18 +27,34 @@ configure_file(
 
 # Add ExternalProjects for tools that run out-of-the-box
 
+# micrOMEGAs version to fetch and build.
+set(MICROMEGAS_VERSION 7.1.4)
+
+# The v7.1 tarball was packaged on macOS, so its archive root holds TWO top-level
+# entries: the real `micromegas_${MICROMEGAS_VERSION}/` directory and an AppleDouble
+# metadata sidecar (`._micromegas_${MICROMEGAS_VERSION}`). CMake's ExternalProject only
+# flattens the extracted archive into <SOURCE_DIR> when there is exactly ONE top-level
+# item, so the platforms diverge: Linux leaves the nested version directory in place,
+# while macOS may fold the AppleDouble sidecar into xattrs and flatten. The first patch
+# step therefore runs normalise_micromegas_layout.sh, which makes both cases converge on
+# a single layout (everything directly under <SOURCE_DIR>); every command below then
+# targets <SOURCE_DIR> itself.
+set(NORMALISE_LAYOUT
+    bash ${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/normalise_micromegas_layout.sh <SOURCE_DIR> ${MICROMEGAS_VERSION})
+
 # Add micromegas as ExternalProject
 ExternalProject_Add( micromegas
-    PREFIX micromegas_7.1.4
-    URL https://micromegasdm.github.io/downloadarea/v7.1/micromegas_7.1.4.tgz
+    PREFIX micromegas_${MICROMEGAS_VERSION}
+    URL https://micromegasdm.github.io/downloadarea/v7.1/micromegas_${MICROMEGAS_VERSION}.tgz
     DOWNLOAD_EXTRACT_TIMESTAMP NEW
     UPDATE_COMMAND ""
 
-    # Apply patches
+    # Normalise the extracted layout (see NORMALISE_LAYOUT note above), then apply patches.
     PATCH_COMMAND
-        patch -p1 < ${CMAKE_BINARY_DIR}/patches/001-calchep-compiler-flags.patch &&
-        patch -p1 < ${CMAKE_SOURCE_DIR}/patches/micromegas/002-mssm-disable-features.patch &&
-        patch -p1 < ${CMAKE_SOURCE_DIR}/patches/micromegas/003-mssm-tabular-output.patch
+        ${NORMALISE_LAYOUT} &&
+        patch -p1 -d <SOURCE_DIR> < ${CMAKE_BINARY_DIR}/patches/001-calchep-compiler-flags.patch &&
+        patch -p1 -d <SOURCE_DIR> < ${CMAKE_SOURCE_DIR}/patches/micromegas/002-mssm-disable-features.patch &&
+        patch -p1 -d <SOURCE_DIR> < ${CMAKE_SOURCE_DIR}/patches/micromegas/003-mssm-tabular-output.patch
 
     # Create empty directories (needed by micromegas to build)
     CONFIGURE_COMMAND ""
