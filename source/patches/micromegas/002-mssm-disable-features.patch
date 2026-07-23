@@ -2,47 +2,43 @@
 +++ b/MSSM/main.c
 @@ -4,7 +4,7 @@
     to the corresponding package in lib/Makefile
- =====================================*/ 
+ =====================================*/
  
 -#define RGE  suspect
 +//#define RGE  suspect
  
       /* choose 'suspect','softSusy','spheno', 'tree' */
  
-@@ -16,14 +16,14 @@
- //#define SUGRANUH
- //#define AMSB 
+@@ -17,14 +17,14 @@
+ //#define AMSB
  
--#define EWSB 
+ 
+-#define EWSB
 +//#define EWSB
  
  /*====== Modules ===============
-    Keys to switch on 
+    Keys to switch on
     various modules of micrOMEGAs
  ================================*/
  
--#define MASSES_INFO      
+-#define MASSES_INFO
 +//#define MASSES_INFO
-       /* Display information about SUSY and Higgs masses 
+       /* Display information about SUSY and Higgs masses
        */
- #define CONSTRAINTS     
-@@ -34,8 +34,8 @@
- //#define HIGGSBOUNDS 
- //#define HIGGSSIGNALS
- //#define SUPERISO
--#define LILITH
--#define SMODELS
-+//#define LILITH
-+//#define SMODELS
- //#define MONOJET       
+ #define CONSTRAINTS
+@@ -69,13 +69,13 @@
+         Compare analytical formula for DD against micrOMEGAS calculation.
+         As well as compare tree level and box improved approaches.
+        */
+-#define CDM_NUCLEUS
++//#define CDM_NUCLEUS
+      // Calculate  exclusion rate for direct detection experiments Xenon1T and DarkSide50
  
- #define OMEGA            
-@@ -74,7 +74,7 @@
- //#define NEUTRINO 
+ //#define NEUTRINO
   /*  Neutrino signal of DM annihilation in Sun and Earth */
-  
--#define DECAYS 
+ 
+-#define DECAYS
 +//#define DECAYS
-       /* Calculate decay widths and branchings  */      
- //#define CROSS_SECTIONS 
+       /* Calculate decay widths and branchings  */
+ //#define CROSS_SECTIONS
        /* Calculate cross sections of reactions specified by the user */

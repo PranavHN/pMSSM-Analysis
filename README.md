@@ -40,7 +40,7 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
 | FeynHiggs | 2.19.0 | Precise Higgs mass calculation with higher-order corrections |
 | SuperIso | 5.0 | Flavor physics observables (B-physics, rare decays) |
 | GM2Calc | 2.3.1 | Muon anomalous magnetic moment (g-2) calculation |
-| micrOMEGAs | 5.2.1 | Dark matter relic density and direct/indirect detection. Upgrading to version 6.3.0 requires re-generating patch files. See: https://gitlab.cern.ch/jwuerzin/Run3ModelGen/-/issues/15 |
+| micrOMEGAs | 7.1.4 | Dark matter relic density and direct/indirect detection. Built from source with patches in `source/patches/micromegas/` (compiler flags, disabled built-in modules, tab-separated output for parsing). |
 | SModelS | 3.1.1 | LHC SUSY-search reinterpretation / cross-section upper limits. Uses a bundled pythia8 for LO cross sections (built automatically, see [doc/pythia8.md](doc/pythia8.md)) |
 | EVADE | - | Direct detection constraints (currently unavailable). Version 0.2.0 broke after a recent update to HOM4PS and will remain unavailable for the time being. |
 

@@ -1,35 +1,9 @@
 --- a/MSSM/main.c
 +++ b/MSSM/main.c
-@@ -16,14 +16,14 @@
- //#define SUGRANUH
- //#define AMSB 
- 
--//#define EWSB
-+//#define EWSB 
- 
- /*====== Modules ===============
-    Keys to switch on 
-    various modules of micrOMEGAs
- ================================*/
- 
--//#define MASSES_INFO
-+//#define MASSES_INFO      
-       /* Display information about SUSY and Higgs masses 
-       */
- #define CONSTRAINTS     
-@@ -74,7 +74,7 @@
- //#define NEUTRINO 
-  /*  Neutrino signal of DM annihilation in Sun and Earth */
-  
--//#define DECAYS
-+//#define DECAYS 
-       /* Calculate decay widths and branchings  */      
- //#define CROSS_SECTIONS 
-       /* Calculate cross sections of reactions specified by the user */
-@@ -332,15 +332,15 @@
+@@ -327,15 +327,15 @@
  #ifdef CONSTRAINTS
  { double SMbsg,dmunu,csLim;
-   printf("\n\n==== Physical Constraints: =====\n"); 
+   printf("\n\n==== Physical Constraints: =====\n");
 -  printf("deltartho=%.2E\n",deltarho());
 -  printf("gmuon=%.2E\n", gmuon());
 -  printf("bsgnlo=%.2E ", bsgnlo(&SMbsg)); printf("( SM %.2E )\n",SMbsg);
@@ -42,26 +16,19 @@
 +  printf("bsmumu\t%.2E\n", bsmumu());
 +  printf("btaunu\t%.2E\n", btaunu());
  
--  printf("dtaunu=%.2E  ", dtaunu(&dmunu)); printf("dmunu=%.2E\n", dmunu);   
+-  printf("dtaunu=%.2E  ", dtaunu(&dmunu)); printf("dmunu=%.2E\n", dmunu);
 -  printf("Rl23=%.3E\n", Rl23());
-+  printf("dtaunu\t%.2E  ", dtaunu(&dmunu)); printf("dmunu\t%.2E\n", dmunu);   
++  printf("dtaunu\t%.2E  ", dtaunu(&dmunu)); printf("dmunu\t%.2E\n", dmunu);
 +  printf("Rl23\t%.3E\n", Rl23());
    if(Zinvisible()) printf("Excluded by Z->invisible\n");
    if(LspNlsp_LEP(&csLim)) printf("Excluded by LEP  by e+,e- -> DM q qbar. Cross section =%.2E [pb] \n",csLim);
  
-@@ -491,7 +491,7 @@
- //  sortOddParticles(cdmName);
+@@ -507,7 +507,7 @@
+   printf("\n==== Calculation of relic density =====\n");
  
-    Omega=darkOmega(&Xf,fast,Beps,&err);
--   printf("Xf=%.2e Omega=%.2e\n",Xf,Omega);
-+   printf("Xf\t%.2e Omega\t%.2e\n",Xf,Omega);
- 
-    if(Omega>0)printChannels(Xf,cut,Beps,1,stdout);
- 
-@@ -818,4 +818,4 @@
- 
-   killPlots();
-   return 0;
--}
-\ No newline at end of file
-+}
+   Omega=darkOmega(&Xf,fast,Beps,&err);
+-  printf("Xf=%.2e Omega=%.2e err=%d\n",Xf,Omega,err);
++  printf("Xf\t%.2e Omega\t%.2e err=%d\n",Xf,Omega,err);
+   if(isfinite(Omega) )printChannels(Xf,cut,Beps,1,stdout);
+   
+ }

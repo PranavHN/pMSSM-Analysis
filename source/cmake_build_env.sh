@@ -45,7 +45,7 @@ trap - ERR
 
 # Manipulating env vars: PATH, PYTHONPATH and DATAPATH
 echo 'export PATH="'${source_dir}'/Run3ModelGen/scripts:$PATH"' >> $build_dir/setup.sh
-echo 'export PATH="'${build_dir}'/micromegas_5.2.1/src/micromegas/MSSM:$PATH"' >> $build_dir/setup.sh
+echo 'export PATH="'${build_dir}'/micromegas_7.1.4/src/micromegas/MSSM:$PATH"' >> $build_dir/setup.sh
 # echo 'export PATH="'${build_dir}'/EVADE-0.2.0/src/evade-build/:$PATH"' >> $build_dir/setup.sh
 echo 'export PYTHONPATH="'${build_dir}':$PYTHONPATH"' >> $build_dir/setup.sh
 echo 'export DATAPATH="'${source_dir}/Run3ModelGen/data':$DATAPATH"' >> $build_dir/setup.sh

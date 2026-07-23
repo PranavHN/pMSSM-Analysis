@@ -29,8 +29,8 @@ configure_file(
 
 # Add micromegas as ExternalProject
 ExternalProject_Add( micromegas
-    PREFIX micromegas_5.2.1
-    URL https://lapth.cnrs.fr/micromegas/downloadarea/code/micromegas_5.2.1.tgz
+    PREFIX micromegas_7.1.4
+    URL https://micromegasdm.github.io/downloadarea/v7.1/micromegas_7.1.4.tgz
     DOWNLOAD_EXTRACT_TIMESTAMP NEW
     UPDATE_COMMAND ""
 
@@ -50,10 +50,16 @@ ExternalProject_Add( micromegas
 
     BUILD_IN_SOURCE 1
 
-    # macOS: micromegas links MSSM/main against a relative dylib path ("../lib/maxGap.so"),
-    # which dyld cannot resolve when `main` runs from the scan directory. Rewrite the
-    # install names to absolute paths. The helper is a no-op on non-Darwin platforms.
+    # Post-build steps (run once, after micromegas is built):
+    #  1. macOS: micromegas links MSSM/main against a relative dylib path ("../lib/maxGap.so"),
+    #     which dyld cannot resolve when `main` runs from the scan directory. Rewrite the
+    #     install names to absolute paths. The helper is a no-op on non-Darwin platforms.
+    #  2. Warm the CalcHEP process-library cache by evaluating the sample spectrum once, so
+    #     the one-time matrix-element compilation happens here (and is baked into the CI
+    #     Docker image) instead of on the first scan point. Best-effort; streams the CalcHEP
+    #     compilation output to the build log.
     INSTALL_COMMAND bash ${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/fix_micromegas_install_names.sh <SOURCE_DIR>
+        COMMAND bash ${CMAKE_SOURCE_DIR}/Run3ModelGen/scripts/warm_micromegas_cache.sh <SOURCE_DIR>
 )
 
 # # Add EVADE as ExternalProject - DISABLED; PROBABLY PERMANENTLY BROKEN!
