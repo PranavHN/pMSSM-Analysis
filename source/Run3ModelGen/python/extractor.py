@@ -104,8 +104,12 @@ class ModelExtractor:
         else:
             log.info(f"Scan dir {self.scan_dir} is regular directory! Will extract files from it...")
             
-            # Get list of subdirs to check, as well as list of file extentions
-            subdirlist = [subdir for subdir in os.listdir(self.scan_dir) if os.path.isdir(f"{self.scan_dir}/{subdir}")]
+            # Get list of subdirs to check, as well as list of file extentions.
+            # SModelS_xsec holds the workflow's xsec-augmented SPheno copies —
+            # already folded back into SPheno/ inside tarballs, so skip it here
+            # too for identical extraction output from dirs and tarballs.
+            subdirlist = [subdir for subdir in os.listdir(self.scan_dir)
+                          if os.path.isdir(f"{self.scan_dir}/{subdir}") and subdir != "SModelS_xsec"]
             suffixlist = [os.listdir(f"{self.scan_dir}/{subdir}")[0].split('.')[-1] for subdir in subdirlist]
             
             # Get output directory name

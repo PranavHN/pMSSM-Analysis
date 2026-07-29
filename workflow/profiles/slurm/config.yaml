@@ -1,0 +1,58 @@
+# SLURM profile (defaults tuned for the MPCDF viper cluster used so far:
+# partition 'general', scan dirs on /ptmp — pass e.g.
+#   --config scan_parent=/ptmp/$USER/run3modelgen/<runid>
+# at invocation; scan_parent must be on a filesystem visible to all workers).
+executor: slurm
+# High enough that every batch is submitted immediately, so a dead orchestrator
+# cannot leave batches unsubmitted (see the htcondor profile for the reasoning).
+# Lower it if the site enforces a MaxSubmitJobs limit — but then a driver (or a
+# periodic re-run of the same command) really is required to finish the run.
+jobs: 1000
+local-cores: 4
+# Driver-side retries: only apply while the orchestrator lives. Slurm has no
+# equivalent for a non-zero exit — slurm-requeue below covers node failure and
+# preemption only — so on this backend a driver death does mean failed batches
+# wait for a manual re-run.
+retries: 2
+keep-going: true
+rerun-incomplete: true
+latency-wait: 60
+slurm-requeue: true
+
+# One cluster job per batch: all per-batch rules share a group, and batches are
+# disconnected components, so each batch's sample -> steps -> ntuple chain is
+# submitted as a single SLURM job (legacy job granularity, ~10x less scheduler
+# churn). Incremental re-runs still execute only the missing rules.
+groups:
+  - sample=batch
+  - step=batch
+  - ntuple=batch
+  - chain=batch
+  - tarball=batch
+  - publish=batch     # publish inside the batch job (parity with htcondor)
+group-components:
+  - batch=1
+
+# NB: a group job's time limit is the SUM of its rules' runtimes — keep the
+# per-rule values small enough that sample + 8 steps + ntuple fits the
+# partition limit (general: 24h). No cpus_per_task default: the slurm plugin
+# derives it from threads, so the group requests max(threads) = 4 CPUs.
+default-resources:
+  slurm_partition: "'general'"
+  runtime: 60           # minutes per rule
+  mem_mb: 4000
+
+set-resources:
+  step:
+    runtime: 120        # per tool over a whole batch; group total = 18h
+    # SModelS alone peaks at ~1.6 GB just loading the results database (measured),
+    # before pythia8 and the python interpreter on top; 4 GB leaves no headroom
+    # for a full-size batch. The group requests max(mem_mb) over its rules.
+    mem_mb: 8000
+  chain:
+    runtime: 1380       # a full MH chain is one long sequential job (23h)
+    mem_mb: 8000
+
+set-threads:
+  step: 4               # group max -> 4 CPUs per batch job (legacy RequestCpus=4)
+  chain: 4

@@ -1,0 +1,52 @@
+# HTCondor profile (CERN lxplus/lxbatch: shared-FS checkout + .pixi env, EOS
+# mounted on workers — the same model the historical condor flow relied on).
+# The entrypoints (--backend htcondor) override --htcondor-jobdir (from
+# --log_dir) and classad_JobFlavour (from --flavour) on the command line.
+executor: htcondor
+# Submit EVERY batch immediately rather than in waves. The orchestrator is a
+# plain user process on the submit node and can die (logout, reboot, systemd
+# session cleanup); anything it has not submitted by then never runs. Each
+# cluster job carries its batch's whole rule group, so once submitted a batch
+# needs no driver at all — the cap is therefore the one thing that decides
+# whether a driver death is survivable. This mirrors the historical flow, which
+# submitted all N jobs in one `queue N`.
+jobs: 10000
+local-cores: 2
+# Driver-side retries: only apply while the orchestrator lives.
+retries: 2
+keep-going: true
+rerun-incomplete: true
+latency-wait: 120       # EOS/AFS close-to-open latency
+htcondor-jobdir: htcondor-logs
+
+# One cluster job per batch (see slurm profile for rationale). publish stays in
+# the group too: it runs on the worker, which has EOS mounted + a delegated
+# kerberos credential — exactly like the historical condor worker's copy step.
+groups:
+  - sample=batch
+  - step=batch
+  - ntuple=batch
+  - chain=batch
+  - tarball=batch
+  - publish=batch
+group-components:
+  - batch=1
+
+# NB: there is deliberately no scheduler-side retry here. The plugin does read a
+# `max_retries` resource, but it submits through the htcondor python bindings,
+# whose Submit object stores the key verbatim and never expands it into the
+# MaxRetries/OnExitRemove pair that condor_submit's parser generates — verified:
+# the resource reaches the orchestrator and the resulting job ad still has
+# MaxRetries = undefined. So a batch that fails with no orchestrator alive is
+# NOT retried; re-run the same command to pick it up (see doc/snakemake.md).
+default-resources:
+  # quoted so snakemake evaluates it to the bare string tomorrow; the htcondor
+  # plugin adds the quotes the submit file needs (+JobFlavour = "tomorrow")
+  classad_JobFlavour: "'tomorrow'"
+  classad_MaxRuntime: 604800            # legacy +MaxRuntime parity (7 days)
+  htcondor_request_disk_mb: 700         # legacy RequestDisk = 700000 KiB
+  htcondor_request_mem_mb: 4000
+
+set-threads:
+  step: 4               # threads -> request_cpus; group max = legacy RequestCpus=4
+  chain: 4

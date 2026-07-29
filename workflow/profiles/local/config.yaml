@@ -1,0 +1,11 @@
+# Local executor profile — used by the genModels.py facade, CI, and macOS.
+cores: all
+keep-going: true        # one broken batch must not kill the others
+rerun-incomplete: true
+latency-wait: 5
+
+# Only one SModelS step at a time: it holds the ~1.4 GB results database in
+# memory per model, and concurrent batches doing that got OOM-killed in CI.
+# Every other step keeps running in parallel (see rule step in generate.smk).
+resources:
+  - smodels_db=1

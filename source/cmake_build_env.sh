@@ -43,13 +43,18 @@ ln -s $source_dir/Run3ModelGen/python/* $build_dir/Run3ModelGen/ 2>/dev/null
 # Deactivate custom error handling
 trap - ERR
 
-# Manipulating env vars: PATH, PYTHONPATH and DATAPATH
-echo 'export PATH="'${source_dir}'/Run3ModelGen/scripts:$PATH"' >> $build_dir/setup.sh
-echo 'export PATH="'${build_dir}'/micromegas_5.2.1/src/micromegas/MSSM:$PATH"' >> $build_dir/setup.sh
-# echo 'export PATH="'${build_dir}'/EVADE-0.2.0/src/evade-build/:$PATH"' >> $build_dir/setup.sh
-echo 'export PYTHONPATH="'${build_dir}':$PYTHONPATH"' >> $build_dir/setup.sh
-echo 'export DATAPATH="'${source_dir}/Run3ModelGen/data':$DATAPATH"' >> $build_dir/setup.sh
-echo 'export EOSPATH="/eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen"' >> $build_dir/setup.sh
+# Manipulating env vars: PATH, PYTHONPATH and DATAPATH. The ${VAR:-} guards keep
+# the generated setup.sh safe to source under `set -u` (e.g. inside Snakemake
+# shell rules, which run with `set -euo pipefail`).
+echo 'export PATH="'${source_dir}'/Run3ModelGen/scripts:${PATH:-}"' >> $build_dir/setup.sh
+echo 'export PATH="'${build_dir}'/micromegas_5.2.1/src/micromegas/MSSM:${PATH:-}"' >> $build_dir/setup.sh
+# echo 'export PATH="'${build_dir}'/EVADE-0.2.0/src/evade-build/:${PATH:-}"' >> $build_dir/setup.sh
+echo 'export PYTHONPATH="'${build_dir}':${PYTHONPATH:-}"' >> $build_dir/setup.sh
+echo 'export DATAPATH="'${source_dir}/Run3ModelGen/data':${DATAPATH:-}"' >> $build_dir/setup.sh
+# EOSPATH is overridable (mirrors the SMODELS_CACHEDIR guard below): a pre-set
+# value wins, e.g. CI pointing --publish at a scratch dir, or SLURM sites
+# without /eos. Default stays the lxplus location.
+echo 'export EOSPATH="${EOSPATH:-/eos/user/'$(whoami | head -c 1)/$(whoami)'/Run3ModelGen}"' >> $build_dir/setup.sh
 echo 'export RUN3MODELGENDIR="'${source_dir%source}'"' >> $build_dir/setup.sh
 # Set SMODELS_CACHEDIR (where SModelS caches its downloaded results-database
 # pickle) — but only if it isn't already set. A pre-set value (e.g. the persistent
@@ -63,6 +68,16 @@ echo '    export SMODELS_CACHEDIR="/eos/user/'$(whoami | head -c 1)/$(whoami)'/R
 echo '  else' >> $build_dir/setup.sh
 echo '    export SMODELS_CACHEDIR="'${source_dir%source}'"' >> $build_dir/setup.sh
 echo '  fi' >> $build_dir/setup.sh
+echo 'fi' >> $build_dir/setup.sh
+
+# Silence htcondor2's "CONDOR_CONFIG is unset" warning, which snakemake triggers on
+# every start (its executor-plugin discovery imports the htcondor bindings) on any
+# host without a condor configuration — i.e. every non-CERN machine. /dev/null is
+# what htcondor falls back to anyway; only set it when the host has no condor client
+# at all, so real config discovery on lxplus/lxbatch is left untouched.
+echo '# Quiet htcondor2 config warning on hosts without HTCondor (snakemake imports it)' >> $build_dir/setup.sh
+echo 'if [ -z "${CONDOR_CONFIG:-}" ] && ! command -v condor_submit >/dev/null 2>&1; then' >> $build_dir/setup.sh
+echo '  export CONDOR_CONFIG=/dev/null' >> $build_dir/setup.sh
 echo 'fi' >> $build_dir/setup.sh
 
 # Ensure SModelS's bundled pythia8 is built. This runs on every `source build/setup.sh`,

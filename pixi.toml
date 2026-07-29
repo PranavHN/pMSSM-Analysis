@@ -1,9 +1,11 @@
 [workspace]
 name = "Run3ModelGen"
-version = "0.4.0"
+version = "1.0.0"
 description = "Modern pMSSM Model Generation Framework"
 authors = ["Jonas Wuerzinger <jonas.wuerzinger@gmail.com>"]
-channels = ["conda-forge"]
+# conda-forge first = channel priority: every pre-existing package keeps
+# resolving from conda-forge; bioconda only supplies snakemake + executor plugins.
+channels = ["conda-forge", "bioconda"]
 # platforms = ["linux-64", "osx-64", "osx-arm64"]
 # osx-64 runs under Rosetta on Apple Silicon. Native osx-arm64 is not supported:
 # conda-forge has no feynhiggs build for macOS, and the pinned gfortran/gcc 13.2
@@ -16,11 +18,29 @@ platforms = ["linux-64", "osx-64"]
 # automatically as part of the CMake build (see source/CMakeLists.txt setup_pythia8).
 setup-pythia8 = "bash source/Run3ModelGen/scripts/setup_pythia8.sh"
 
+# The dagviz install comes first and is deliberately non-fatal: it only provides
+# the graphviz `dot` that renders each run's DAG snapshot as SVG (the .dot source
+# is always written without it), so no network hiccup may fail the actual build.
+# Keeping the cmake chain last also keeps the task's exit code the build's own.
 build = """
+pixi install -e dagviz || echo "[build] dagviz env unavailable - runs will save dag.dot but no dag.svg"
 cmake -S source -B build && \
 cmake \
     --build build \
     --parallel 8
+"""
+
+# Direct snakemake access for power users (the script entrypoints
+# genModels.py/extractModels.py/rerunStep.py with --backend are the primary
+# surface — see doc/snakemake.md). Runs from run/ like the other tasks; pass
+# profile, config and targets through, e.g.:
+#   pixi run smk --workflow-profile ../workflow/profiles/local --config scan_dir=scan seed=123
+smk = """
+bash -c '\
+. build/setup.sh && \
+mkdir -p run && \
+cd run && \
+snakemake -s ../workflow/Snakefile "$@"' --
 """
 
 # c.f. https://github.com/prefix-dev/pixi/issues/1350
@@ -37,6 +57,15 @@ bash -c '\
 . build/setup.sh && \
 cd run && \
 extractModels.py --scan_dir scan --root_file scan/ntuple.0.0.root --selection "(akarr['SS_m_h']!=-1) & (akarr['SS_m_h'] <= 130)"'
+"""
+
+# The full offline check suite (unit tests incl. the sampled-point golden file,
+# plus workflow DAG dry-runs). Identical to what the CI dry-run job runs — both
+# call this script.
+test = """
+bash -c '\
+. build/setup.sh && \
+bash tests/run_checks.sh'
 """
 
 clean = """
@@ -106,6 +135,12 @@ softsusy = ">=4.1.22,<5"
 superiso = ">=5.0,<6"
 gm2calc-python = ">=2.3.1,<3"
 xrootd = ">=5.6,<7"  # provides the xrdcp client for uploading/downloading EOS reference files
+# Explicit numpy pin to the previously-locked version: the sampled-point RNG
+# streams (and thus the CI per-step reference counts) must not drift when the
+# snakemake additions re-solve the environment.
+numpy = "2.4.6.*"
+snakemake-minimal = ">=9,<10"  # bioconda; workflow engine (see workflow/)
+pytest = ">=8,<9"  # unit tests for the pure layer (see tests/)
 
 [target.linux-64.dependencies]
 gcc = ">=13.2.0,<13.3"
@@ -113,6 +148,14 @@ cxx-compiler = ">=1.0.0,<1.1"
 libconfig = ">=1.7.3,<1.8"
 # feynhiggs is only packaged on conda-forge for linux-64.
 feynhiggs = ">=2.19.0,<3"
+# Batch executors are linux-only (macOS runs the local executor); keeping the
+# plugins out of osx-64 preserves that platform's solve.
+snakemake-executor-plugin-slurm = ">=1"
+
+[target.linux-64.pypi-dependencies]
+# Via PyPI, not bioconda: the conda package needs python-htcondor, which has no
+# py3.11 build on conda-forge; the PyPI htcondor wheels do cover 3.11.
+snakemake-executor-plugin-htcondor = ">=0.2"
 
 [target.osx-64.dependencies]
 # On macOS the C/C++ toolchain comes from clang (via cxx-compiler); GNU gcc is not
@@ -130,5 +173,12 @@ libconfig = ">=1.7.3,<1.8"
 python = "3.11.*"
 root_base = ">=6.40.0,<7"
 
+# Standalone graphviz for rendering workflow DAGs (snakemake --dag | dot ...).
+# Isolated on purpose: graphviz's GUI dependency stack (older libxml2 etc.)
+# would force a downgrade of xrootd in the default environment.
+[feature.dagviz.dependencies]
+graphviz = ">=9"
+
 [environments]
 rootenv = { features = ["rootenv"], no-default-feature = true }
+dagviz = { features = ["dagviz"], no-default-feature = true }

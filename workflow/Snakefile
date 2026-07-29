@@ -1,0 +1,273 @@
+'''Run3ModelGen Snakemake workflow.
+
+One batch = one scan directory (= what one legacy condor job produced). Within
+a batch, every physics tool is its own rule, linearly chained in config-step
+order via per-step manifests so per-model failure gating — and therefore the
+CI per-step reference counts — match the legacy in-process loop exactly.
+
+Invocation surfaces:
+  * genModels.py / extractModels.py / rerunStep.py — user-facing entrypoints
+    (--backend local|slurm|htcondor selects the profile)
+  * direct: snakemake -s workflow/Snakefile --workflow-profile workflow/profiles/local \
+        --config mode=single scan_dir=run/scan config_file=... seed=123
+
+Config keys (all may arrive as strings via --config):
+  mode        "single" (one scan dir, exact seed) | "batch" (scan.<runid>.<b> fan-out)
+  config_file scan config yaml; empty = default config
+  scan_dir    single mode: target scan directory (default "scan")
+  seed        single mode: numpy seed, used AS-IS (default 123)
+  runid       batch mode: run identifier replacing the condor ClusterId (digits, dot-free)
+  base_seed   batch mode: seed base; per-batch seed = blake2b(runid:base_seed:b) (default 123)
+  batches     batch mode: number of batches (genModels.py --num_jobs)
+  scan_parent batch mode: directory holding the scan.<runid>.<b> dirs (default ".")
+  publish     "none" | "eos" (batch mode: copy tarball+ntuple+config to $EOSPATH/<runid>/<b>/)
+  keep_local  "0" (default) | "1" — with publish=eos, "0" deletes each batch's
+              scan dir + tarball once its published copies verify, so the run
+              occupies no space outside $EOSPATH; "1" keeps both (the r3mg
+              bookkeeping is kept either way, so resume still works)
+
+Parse-time purity: this file (and the included .smk files) import ONLY the
+stdlib + yaml — remote executors re-parse it inside every job, where the
+Run3ModelGen package/env may not be importable yet. All heavy lifting happens
+in shell rules through r3mg_batch.py after build/setup.sh is sourced.
+'''
+
+import base64
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import yaml
+
+REPO = os.path.dirname(workflow.basedir)
+DATA = f"{REPO}/source/Run3ModelGen/data"
+SCRIPTS = f"{REPO}/source/Run3ModelGen/scripts"     # user entrypoints + build helpers
+RULE_SCRIPTS = f"{workflow.basedir}/scripts"        # rule bodies (r3mg_batch.py)
+ENV_BIN = f"{REPO}/.pixi/envs/default/bin"
+
+# Every rule shell gets the full legacy worker environment: the pixi env's
+# binaries (SPheno, softpoint.x, slha.x, gm2calc.x, FeynHiggs, python, ...)
+# plus build/setup.sh (scripts + micromegas on PATH, PYTHONPATH, DATAPATH,
+# EOSPATH, RUN3MODELGENDIR, SMODELS_CACHEDIR). Absolute shared-FS paths, so
+# this works identically under the local, slurm and htcondor executors.
+# SETUP_PYTHIA8_QUIET: setup.sh re-runs the (idempotent) pythia8 check on every
+# source; silence its per-rule "nothing to do" line — real builds still print.
+# NB: no literal braces here — snakemake runs its formatter over the prefix.
+shell.prefix(f'set -euo pipefail; export PATH="{ENV_BIN}:$PATH"; '
+             f'export SETUP_PYTHIA8_QUIET=1; source {REPO}/build/setup.sh; ')
+
+
+# ── config ─────────────────────────────────────────────────────────────────
+
+MODE        = str(config.get("mode", "single"))
+CONFIG_FILE = str(config.get("config_file", "") or "")
+SCAN_DIR    = os.path.normpath(str(config.get("scan_dir", "scan")))
+SEED        = int(config.get("seed", 123))
+RUNID       = str(config.get("runid", "0"))
+BASE_SEED   = int(config.get("base_seed", 123))
+BATCHES     = int(config.get("batches", 2))
+SCAN_PARENT = str(config.get("scan_parent", ".")).rstrip("/")
+PUBLISH     = str(config.get("publish", "none"))
+KEEP_LOCAL  = str(config.get("keep_local", "0")).lower() in ("1", "true", "yes")
+
+if MODE not in ("single", "batch", "extract"):
+    raise ValueError(f"mode must be 'single', 'batch' or 'extract', got '{MODE}'")
+if MODE == "batch" and not re.fullmatch(r"\d+", RUNID):
+    # the scan.<C>.<P> naming contract (ntupling/extractor) needs digit-only ids
+    raise ValueError(f"runid must be digits only (ClusterId-shaped), got '{RUNID}'")
+
+
+def _load_cfg(config_file):
+    '''Default-config merge — parse-time mirror of pipeline.load_scan_config
+    (kept yaml-only on purpose; change BOTH if the merge logic ever changes;
+    tests/test_snakefile_mirrors.py pins the agreement).'''
+    with open(f"{DATA}/configs/default_config.yaml") as f:
+        merged = yaml.safe_load(f)
+    user = {}
+    if config_file:
+        with open(config_file) as f:
+            user = yaml.safe_load(f)
+    if 'num_models' not in user and user.get('prior') == 'fixed':
+        merged['num_models'] = len(user['parameters']['tanb'])
+    merged.update(user)
+    return merged
+
+
+def _resolve_steps(steps):
+    '''Platform filter — parse-time mirror of pipeline.resolve_steps.
+
+    Same union as pipeline.tool_available: the pixi env by absolute path (so the
+    DAG is identical on submit host and workers regardless of PATH state at
+    parse time) OR PATH (so a tool installed outside the env resolves here the
+    way it will at run time). Checking only one of the two makes this filter
+    disagree with the rule bodies, silently.'''
+    step_executables = {'feynhiggs': 'FeynHiggs'}
+
+    def available(exe):
+        return os.path.exists(f"{ENV_BIN}/{exe}") or shutil.which(exe) is not None
+
+    return [s for s in steps
+            if step_executables.get(s['name']) is None
+            or available(step_executables[s['name']])]
+
+
+CFG = _load_cfg(CONFIG_FILE)
+PRIOR = CFG.get("prior", "flat")
+STEPS = _resolve_steps(CFG.get("steps", []))
+STEP_NAMES = [s["name"] for s in STEPS]
+LAST_STEP = STEP_NAMES[-1]
+
+
+def _batch_seed(runid, base_seed, b):
+    '''Per-batch seed — keep in sync with pipeline.batch_seed
+    (tests/test_snakefile_mirrors.py pins the agreement).'''
+    h = hashlib.blake2b(f"{runid}:{base_seed}:{b}".encode(), digest_size=4)
+    return int.from_bytes(h.digest(), "big")
+
+
+def _ntuple_basename(scan_name):
+    '''ntuple naming contract — mirror of ntupling.mkntuple / pipeline.ntuple_name
+    (tests/test_snakefile_mirrors.py pins the agreement).'''
+    parts = scan_name.split(".")
+    if len(parts) == 3:
+        return f"ntuple.{parts[1]}.{parts[2]}.root"
+    return "ntuple.0.0.root"
+
+
+# ── scan table: name -> {dir, seed} ────────────────────────────────────────
+
+# BATCH_PREFIX joins scan_parent and the scan-name stem WITHOUT a leading
+# './' (snakemake warns on — and may mismatch — './'-prefixed file paths).
+BATCH_PREFIX = os.path.normpath(f"{SCAN_PARENT}/scan.{RUNID}")
+
+if MODE == "single":
+    _name = os.path.basename(SCAN_DIR)
+    _parent = os.path.dirname(SCAN_DIR) or "."
+    SCANS = {_name: {"dir": SCAN_DIR, "seed": SEED}}
+    SCAN_PARENT = _parent
+elif MODE == "batch":
+    SCANS = {f"scan.{RUNID}.{b}": {"dir": f"{BATCH_PREFIX}.{b}",
+                                   "seed": _batch_seed(RUNID, BASE_SEED, b)}
+             for b in range(BATCHES)}
+else:
+    SCANS = {}
+
+# Snakemake bookkeeping lives OUTSIDE the scan dirs so tarball contents stay
+# byte-compatible with the legacy layout.
+META = os.path.normpath(f"{SCAN_PARENT}/r3mg")
+WARM = f"{REPO}/build/.warm"
+
+CFG_OPT = f"--config_file {CONFIG_FILE}" if CONFIG_FILE else ""
+
+if SCANS:
+    wildcard_constraints:
+        scan="|".join(re.escape(s) for s in SCANS),
+        b=r"\d+"
+
+
+if MODE == "extract":
+    include: "rules/extract.smk"
+else:
+    include: "rules/warmup.smk"
+    if PRIOR == "mcmc":
+        include: "rules/chain.smk"
+    else:
+        include: "rules/generate.smk"
+    include: "rules/publish.smk"
+
+
+def _final_targets():
+    if MODE == "extract":
+        _work = str(config.get("work_dir", ".")).rstrip("/")
+        _mark = os.path.normpath(f"{_work}/r3mg_extract")
+        _cluster = os.path.basename(str(config["eos_dir"]).rstrip("/"))
+        _procids = [p.strip() for p in str(config["procids"]).split(",") if p.strip() != ""]
+        return [f"{_mark}/{_cluster}.{p}.ok" for p in _procids]
+    targets = [f"{SCANS[s]['dir']}/{_ntuple_basename(s)}" for s in SCANS]
+    if MODE == "batch" and PUBLISH == "eos":
+        published = [f"{META}/{s}/published.ok" for s in SCANS]
+        # Publishing means the data ends up on EOS ONLY, so the publish rule
+        # removes each batch's scan dir and tarball. The ntuples then must not
+        # be top-level targets: snakemake regenerates a missing *requested* file
+        # (it leaves a missing intermediate alone), so listing them would re-run
+        # every batch from scratch to re-create what publish just deleted. The
+        # published markers span the same DAG — they depend on the ntuples.
+        return published if not KEEP_LOCAL else targets + published
+    return targets
+
+
+rule all:
+    default_target: True
+    input: _final_targets()
+
+
+# ── automatic DAG snapshot ─────────────────────────────────────────────────
+
+def _dag_out_base():
+    '''Where this run's DAG snapshot lives (next to the run's bookkeeping).'''
+    if MODE == "extract":
+        _work = str(config.get("work_dir", ".")).rstrip("/")
+        _cluster = os.path.basename(str(config["eos_dir"]).rstrip("/"))
+        return os.path.normpath(f"{_work}/r3mg_extract/dag.{_cluster}")
+    if MODE == "batch":
+        return f"{META}/dag.{RUNID}"
+    return f"{META}/{next(iter(SCANS))}/dag"
+
+
+def _save_dag():
+    '''Best-effort DAG snapshot for this run: always writes <base>.dot, and
+    <base>.svg when a graphviz `dot` is reachable (PATH or the dagviz pixi
+    env, checked by direct binary path so nothing gets installed on the fly).
+    Never raises — a failed snapshot must not fail the run.'''
+    try:
+        base = _dag_out_base()
+        os.makedirs(os.path.dirname(base), exist_ok=True)
+        cfg_args = [f"{k}={v}" for k, v in config.items()]
+        res = subprocess.run(
+            [sys.executable, "-m", "snakemake",
+             "-s", workflow.main_snakefile, "--nolock", "--forceall", "--dag",
+             "--config"] + cfg_args,
+            capture_output=True, text=True, timeout=120)
+        if res.returncode != 0 or not res.stdout.strip():
+            return
+        with open(f"{base}.dot", "w") as f:
+            f.write(res.stdout)
+        dot_bin = shutil.which("dot") or (
+            f"{REPO}/.pixi/envs/dagviz/bin/dot"
+            if os.path.exists(f"{REPO}/.pixi/envs/dagviz/bin/dot") else None)
+        if dot_bin:
+            svg = subprocess.run([dot_bin, "-Tsvg"], input=res.stdout,
+                                 capture_output=True, text=True, timeout=120)
+            if svg.returncode == 0:
+                with open(f"{base}.svg", "w") as f:
+                    f.write(svg.stdout)
+    except Exception:
+        pass
+
+
+def _copy_dag_into_scans():
+    '''Copy the run's DAG snapshot into each scan dir (the user-facing place).
+    Done at the END of the run: sample/chain wipe their scan dir on a fresh
+    start, so an onstart copy would not survive. The tarball rule excludes
+    dag.* so published tarballs keep the legacy member layout. Never raises.'''
+    try:
+        base = _dag_out_base()
+        for info in SCANS.values():
+            if os.path.isdir(info["dir"]):
+                for ext in ("dot", "svg"):
+                    if os.path.exists(f"{base}.{ext}"):
+                        shutil.copy2(f"{base}.{ext}", f"{info['dir']}/dag.{ext}")
+    except Exception:
+        pass
+
+
+onstart:
+    _save_dag()
+
+onsuccess:
+    _copy_dag_into_scans()
+
+onerror:
+    _copy_dag_into_scans()

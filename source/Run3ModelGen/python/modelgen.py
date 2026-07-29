@@ -9,9 +9,10 @@ datadir = os.environ['DATAPATH'].split(':')[0]
 import pyslha
 
 from Run3ModelGen.ntupling import mkntuple
-from Run3ModelGen.microextract import microextract
-from Run3ModelGen.addinputblocks import addinputblocks
-from Run3ModelGen.pMSSM_convert import convert_slha
+from Run3ModelGen import pipeline
+from Run3ModelGen import sampling
+from Run3ModelGen import steps as toolsteps
+from Run3ModelGen.steps import StructlogHandler  # re-exported for backwards compatibility
 import Run3ModelGen.csvReader as csvReader
 import shutil
 
@@ -20,138 +21,95 @@ import logging
 log = structlog.get_logger()
 structlog.stdlib.recreate_defaults(log_level=logging.INFO)  # so we have logger names
 
-# Bridge handler: this forwards standard log records → structlog
-class StructlogHandler(logging.Handler):
-    def emit(self, record):
-        # Convert logging.LogRecord → structlog event
-        log.bind(module=record.name).info(record.getMessage())
-
 class ModelGenerator:
     '''Class for Model Generation.'''
-    def __init__(self, config_file: str = None, scan_dir: str = f"scan", seed: int = 123) -> None:
-        '''Initialise scan.'''
-        
+    def __init__(self, config_file: str = None, scan_dir: str = f"scan", seed: int = 123, quiet: bool = False) -> None:
+        '''Initialise scan. Set quiet=True to suppress the logo/verbose init logging
+        (used by the per-step workflow rules, which construct one ModelGenerator per
+        rule — only the batch-opening sample/chain rules print the banner).'''
+
+        self.quiet = quiet
+
         # Print logo. Note: ASCII art generated with https://patorjk.com/software/taag/ (Small, Fitted)
-        with open(f"{datadir}/logo.txt", 'r') as file:
-            logo = "\n"+file.read()+"\n"
-        print(logo)
-        
+        if not quiet:
+            with open(f"{datadir}/logo.txt", 'r') as file:
+                logo = "\n"+file.read()+"\n"
+            print(logo)
+
         self.config_file = config_file
         self.scan_dir = scan_dir
         self.rawfilen = f"{datadir}/raw.slha"
         self.seed = seed
         self.points = {}
         
-        # Add all keys in config_file as attributes. Replace attribute by default if not provided
+        # Add all keys in config_file as attributes. Replace attribute by default if not
+        # provided; extra keys not in the default (e.g. 'grid') are carried through.
         default_config = f"{datadir}/configs/default_config.yaml"
-        config_dict = self.read_yaml_file(self.config_file) if self.config_file is not None else {}
-        
-        for key, defaultval in self.read_yaml_file(default_config).items():
-            if key in config_dict:
-                setattr(self, key, config_dict[key])
-            # If num_models is not supplied and the prior is 'fixed', read number of models from parameters
-            elif key == 'num_models' and config_dict.get('prior', None) == 'fixed':
-                setattr(self, key, len(config_dict['parameters']['tanb']))
-            else:
-                setattr(self, key, defaultval)
+        for key, value in pipeline.load_scan_config(self.config_file, default_config).items():
+            setattr(self, key, value)
 
-        # Load extra config keys not in default (e.g., 'grid' for grid sampling)
-        default_keys = set(self.read_yaml_file(default_config).keys())
-        for key, value in config_dict.items():
-            if key not in default_keys:
-                setattr(self, key, value)
-
-        # Drop pipeline steps whose external tool is not installed on this platform.
-        # In particular FeynHiggs is not packaged on conda-forge for macOS, so on that
-        # platform the 'feynhiggs' step is silently removed rather than failing every
-        # model (and thereby skipping all downstream steps). On Linux, where FeynHiggs
-        # is installed, this is a no-op.
-        step_executables = {'feynhiggs': 'FeynHiggs'}
-        available_steps = []
-        for step in getattr(self, 'steps', []):
-            exe = step_executables.get(step['name'])
-            if exe is not None and shutil.which(exe) is None:
-                log.warning(f"Skipping step '{step['name']}': required executable "
-                            f"'{exe}' not found on PATH (not available on this platform).")
-                continue
-            available_steps.append(step)
-        self.steps = available_steps
+        # Drop pipeline steps whose external tool is not installed on this platform
+        # (e.g. FeynHiggs is not packaged on conda-forge for macOS).
+        self.steps = pipeline.resolve_steps(getattr(self, 'steps', []))
 
         # Check if too many models supplied
-        if self.num_models > 10000:
-            log.fatal(f"num_models too large! Please reduce to max 10,000 and split into multiple jobs using genModels_condor.py!")
-            exit()
+        pipeline.check_model_cap(self.num_models)
         
         # Set numpy seed:
         np.random.seed(self.seed)
         
         # Print information on initialised generator
-        log.info(f"Initialised ModelGenerator with:")
-        for var, varval in vars(self).items():
-            if var == 'parameters':
-                log.info(f"\t{var} = ")
-                for param, paramval in varval.items(): log.info(f"\t\t{param}: {paramval}")
-            elif var == 'steps':
-                log.info(f"\t{var} = ")
-                for step in varval: log.info(f"\t\t{step}")
-            else:
-                log.info(f"\t{var} = {varval}")
+        if not quiet:
+            log.info(f"Initialised ModelGenerator with:")
+            for var, varval in vars(self).items():
+                if var == 'parameters':
+                    log.info(f"\t{var} = ")
+                    for param, paramval in varval.items(): log.info(f"\t\t{param}: {paramval}")
+                elif var == 'steps':
+                    log.info(f"\t{var} = ")
+                    for step in varval: log.info(f"\t\t{step}")
+                else:
+                    log.info(f"\t{var} = {varval}")
 
         return None
     
     def read_yaml_file(self, file_path: str) -> dict:
         '''Function for reading yaml file. Returns dict.'''
-        with open(file_path, 'r') as file:
-            data = yaml.safe_load(file)
+        return pipeline.read_yaml_file(file_path)
 
-        return data
-    
+    def _setup_scan_dirs(self) -> None:
+        '''Create the per-step output directory tree under self.scan_dir.
+        Idempotent (exist_ok=True) — the destructive wipe of a pre-existing
+        scan dir stays in generate_models(), NOT here, so callers that own
+        incremental outputs (the Snakemake rules) can reuse this safely.'''
+        os.makedirs(self.scan_dir, exist_ok=True)
+        for step in self.steps:
+            for dirn in ('output_dir', 'log_dir'):
+                if dirn not in step:
+                    continue
+                os.makedirs(f"{self.scan_dir}/{step[dirn]}", exist_ok=True)
+                if "micromegas" in step['name']:
+                    os.makedirs(f"{self.scan_dir}/{step[dirn]}_raw", exist_ok=True)
+                if "evade" in step['name']:
+                    os.makedirs(f"{self.scan_dir}/{step[dirn]}_config", exist_ok=True)
+                    os.makedirs(f"{self.scan_dir}/{step[dirn]}_evade_in", exist_ok=True)
+
+    def _init_points_arrays(self, size: int = 1) -> None:
+        '''Allocate self.points arrays (one per parameter) of the given size.'''
+        for key in self.parameters:
+            self.points[key] = np.zeros(size)
+
     def sample_flat(self) -> None:
         '''Function for sampling parameters defined in config_dict ranges.'''
-        
-        for key, scanrange in self.parameters.items():
-            
-            # Check if the provided range is interrupted
-            if type(scanrange[0]) == list:
-                weights = []
-                dist = 0
-                
-                # Loop over ranges to get weights for numbers of models
-                for subrange in scanrange:
-                    if type(subrange) != list: raise ValueError(f"Provided scanrange for parameter {key} is not supported!")
-                    weights.append((subrange[1]-subrange[0]))
-                    dist += subrange[1]-subrange[0]
 
-                weights = [weight/dist for weight in weights]
-                
-                # Generate random points according to weights and append result in one np array
-                # Making sure that overall number of models matches
-                points_left = self.num_models
-                points = np.array([])
-                list_numpoints = []
-                for i in range(len(scanrange)):
-                    numpoints = int(self.num_models*weights[i])
-                    if i == len(scanrange)-1: numpoints = points_left
-                    list_numpoints += [numpoints]
-                    
-                    points = np.append(points, np.random.uniform(scanrange[i][0], scanrange[i][1], numpoints))
-                    points_left -= numpoints
-                    
-                self.points[key] = points
-                
-                log.info(f"Found gap in scanning ranges for parameter {key}. Generated random numbers for subranges with weights:", weights=weights)
-                log.info("Resulting in these numbers of points:", list_numpoints=list_numpoints)
-                
-            else:
-                self.points[key] = np.random.uniform(scanrange[0], scanrange[1], self.num_models)
-            
+        self.points.update(sampling.sample_flat(self.parameters, self.num_models))
+
         return None
-    
+
     def sample_fixed(self) -> None:
         '''Function for generating fixed points given by input config file.'''
 
-        for key, pointlist in self.parameters.items():
-            self.points[key] = np.array(pointlist)
+        self.points.update(sampling.sample_fixed(self.parameters))
 
         return None
 
@@ -203,8 +161,7 @@ class ModelGenerator:
 
         # Initialize self.points large enough to index scratch_idx
         # (run_prep_input reads self.points[key][modelnum])
-        for key in self.parameters:
-            self.points[key] = np.zeros(scratch_idx + 1)
+        self._init_points_arrays(scratch_idx + 1)
 
         # Draw random initial point within parameter bounds
         current = self._sample_initial_point()
@@ -371,65 +328,20 @@ class ModelGenerator:
 
     def _build_proposal_widths(self) -> dict:
         '''Build dict of proposal widths, using configured values or 5% of range as default.'''
-        configured = self.mcmc.get('proposal_widths', {})
-        widths = {}
-        for key, scanrange in self.parameters.items():
-            if key in configured:
-                widths[key] = configured[key]
-            else:
-                if isinstance(scanrange[0], list):
-                    total_range = sum(sr[1] - sr[0] for sr in scanrange)
-                else:
-                    total_range = scanrange[1] - scanrange[0]
-                widths[key] = abs(total_range) * 0.05
-        return widths
+        return sampling.build_proposal_widths(self.parameters, self.mcmc)
 
     def _sample_initial_point(self) -> dict:
         '''Sample a random starting point within all parameter bounds.'''
-        point = {}
-        for key, scanrange in self.parameters.items():
-            if isinstance(scanrange[0], list):
-                # Pick a random subrange weighted by width, then uniform within it
-                range_widths = [sr[1] - sr[0] for sr in scanrange]
-                total = sum(range_widths)
-                probs = [w / total for w in range_widths]
-                idx = np.random.choice(len(scanrange), p=probs)
-                point[key] = np.random.uniform(scanrange[idx][0], scanrange[idx][1])
-            else:
-                point[key] = np.random.uniform(scanrange[0], scanrange[1])
-        return point
+        return sampling.sample_initial_point(self.parameters)
 
     def _propose(self, current: dict, widths: dict) -> dict:
         '''Propose a new point using Gaussian perturbation with boundary handling.'''
-        proposed = {}
-        for key, value in current.items():
-            if widths[key] == 0:
-                proposed[key] = value
-                continue
-
-            new_val = value + np.random.normal(0, widths[key])
-            scanrange = self.parameters[key]
-
-            if isinstance(scanrange[0], list):
-                # Interrupted range: reject this dimension if proposed falls in a gap
-                in_range = any(sr[0] <= new_val <= sr[1] for sr in scanrange)
-                proposed[key] = new_val if in_range else value
-            else:
-                proposed[key] = self._reflect(new_val, scanrange[0], scanrange[1])
-
-        return proposed
+        return sampling.propose(current, widths, self.parameters)
 
     @staticmethod
     def _reflect(value: float, low: float, high: float) -> float:
         '''Reflect value into [low, high] interval to preserve detailed balance.'''
-        if low == high:
-            return low
-        while value < low or value > high:
-            if value < low:
-                value = 2 * low - value
-            if value > high:
-                value = 2 * high - value
-        return value
+        return sampling.reflect(value, low, high)
 
     def _run_and_evaluate(self, modelnum: int) -> float:
         '''Run all pipeline steps for modelnum, then compute chi2 from constraints.
@@ -623,58 +535,11 @@ class ModelGenerator:
         After expansion, ``self.num_models`` is overridden with the grid size
         and ``self.points`` is populated identically to ``sample_flat``.
         """
-        from itertools import product as cartesian_product
-
-        grid_spec = getattr(self, 'grid', {})
-        if not grid_spec:
-            raise ValueError("prior='grid' requires a 'grid' section in the YAML config")
-
-        # Build 1-D arrays for each grid parameter
-        grid_axes = {}
-        for param, values in grid_spec.items():
-            grid_axes[param] = np.array(values, dtype=float)
-            log.info(f"Grid axis: {param} → {len(values)} points")
-
-        # Cartesian product of all grid axes
-        axis_names = list(grid_axes.keys())
-        axis_arrays = [grid_axes[n] for n in axis_names]
-        grid_points = list(cartesian_product(*axis_arrays))
-        n_grid = len(grid_points)
-        log.info(f"Grid total: {n_grid} points from {len(axis_names)} axes")
-
-        if n_grid > 10000:
-            log.fatal(f"Grid produces {n_grid} points — exceeds the 10,000 model limit! "
-                       "Reduce grid axes or split into multiple jobs using genModels_condor.py.")
-            exit()
+        points, n_grid = sampling.sample_grid(self.parameters, getattr(self, 'grid', {}))
 
         # Override num_models
         self.num_models = n_grid
-
-        # Populate self.points
-        for i, name in enumerate(axis_names):
-            self.points[name] = np.array([pt[i] for pt in grid_points])
-
-        # Random-sample remaining parameters from their ranges
-        for key, scanrange in self.parameters.items():
-            if key in grid_spec:
-                continue
-            if isinstance(scanrange[0], list):
-                # Interrupted range — weighted sub-ranges
-                widths = [sr[1] - sr[0] for sr in scanrange]
-                total = sum(widths)
-                probs = [w / total for w in widths]
-                vals = np.empty(n_grid)
-                for j in range(n_grid):
-                    idx = np.random.choice(len(scanrange), p=probs)
-                    vals[j] = np.random.uniform(scanrange[idx][0], scanrange[idx][1])
-                self.points[key] = vals
-            elif scanrange[0] == scanrange[1]:
-                # Fixed value
-                self.points[key] = np.full(n_grid, scanrange[0])
-            else:
-                self.points[key] = np.random.uniform(scanrange[0], scanrange[1], n_grid)
-
-        log.info(f"Grid sampling complete: {n_grid} models")
+        self.points.update(points)
 
     # ── End of grid sampling ──────────────────────────────────────────
 
@@ -688,76 +553,11 @@ class ModelGenerator:
         and generates perturbations_per_seed variants of each seed.
         Uses _propose() for boundary-aware perturbation.
         """
-        import csv
-
-        imp = getattr(self, 'importance', {})
-        if not imp:
-            raise ValueError("prior='importance' requires an 'importance' section in the YAML config")
-
-        seed_file = imp['seed_file']
-        perturbations_per_seed = imp.get('perturbations_per_seed', 10)
-
-        # Read seed CSV
-        if not os.path.isfile(seed_file):
-            raise FileNotFoundError(f"Seed file not found: {seed_file}")
-
-        with open(seed_file) as f:
-            reader = csv.DictReader(f)
-            seeds = list(reader)
-
-        n_seeds = len(seeds)
-        if n_seeds == 0:
-            raise ValueError(f"No seeds found in {seed_file}")
-
-        n_total = n_seeds * perturbations_per_seed
-        log.info(f"Importance sampling: {n_seeds} seeds × {perturbations_per_seed} perturbations = {n_total} models")
-
-        if n_total > 10000:
-            log.fatal(f"Importance sampling produces {n_total} models — exceeds the 10,000 limit!")
-            exit()
-
-        # Build proposal widths: use configured widths, default to 2% of param range
-        configured_widths = imp.get('proposal_widths', {})
-        param_names = [k for k in self.parameters.keys()]
-
-        default_widths = {}
-        for key, scanrange in self.parameters.items():
-            if isinstance(scanrange[0], list):
-                total_range = sum(sr[1] - sr[0] for sr in scanrange)
-            elif scanrange[0] == scanrange[1]:
-                total_range = 0
-            else:
-                total_range = scanrange[1] - scanrange[0]
-            default_widths[key] = 0.02 * total_range
-
-        widths = {}
-        for key in param_names:
-            widths[key] = configured_widths.get(key, default_widths[key])
-            if widths[key] > 0:
-                log.info(f"  {key}: width = {widths[key]:.2f}")
+        points, n_total = sampling.sample_importance(self.parameters, getattr(self, 'importance', {}))
 
         # Override num_models
         self.num_models = n_total
-
-        # Initialize points arrays
-        for key in param_names:
-            self.points[key] = np.empty(n_total)
-
-        # Generate perturbations
-        idx = 0
-        for seed_row in seeds:
-            # Build current point from seed CSV
-            current = {}
-            for key in param_names:
-                current[key] = float(seed_row[key])
-
-            for _ in range(perturbations_per_seed):
-                proposed = self._propose(current, widths)
-                for key in param_names:
-                    self.points[key][idx] = proposed[key]
-                idx += 1
-
-        log.info(f"Importance sampling complete: {n_total} models from {n_seeds} seeds")
+        self.points.update(points)
 
     # ── End of importance sampling ────────────────────────────────────
 
@@ -773,304 +573,96 @@ class ModelGenerator:
     
     def run_prep_input(self, modelnum: int, **kwargs) -> bool:
         '''Prep input. Returns the filename of the prepped file.'''
-        
-        rawfile = pyslha.read(self.rawfilen, ignorenomass = True)
-        
-        rawfile.blocks['EXTPAR'][1] = self.points['M_1'][modelnum]
-        rawfile.blocks['EXTPAR'][2] = self.points['M_2'][modelnum]
-        rawfile.blocks['EXTPAR'][3] = self.points['M_3'][modelnum]
-        rawfile.blocks['EXTPAR'][11] = self.points['AT'][modelnum]
-        rawfile.blocks['EXTPAR'][12] = self.points['Ab'][modelnum]
-        rawfile.blocks['EXTPAR'][13] = self.points['Atau'][modelnum]
-        rawfile.blocks['EXTPAR'][23] = self.points['mu'][modelnum]
-        rawfile.blocks['EXTPAR'][25] = self.points['tanb'][modelnum]
-        rawfile.blocks['EXTPAR'][26] = self.points['mA'][modelnum]
-        rawfile.blocks['EXTPAR'][31] = self.points['meL'][modelnum]
-        rawfile.blocks['EXTPAR'][32] = self.points['meL'][modelnum] # mmuL := meL
-        rawfile.blocks['EXTPAR'][33] = self.points['mtauL'][modelnum]
-        rawfile.blocks['EXTPAR'][34] = self.points['meR'][modelnum]
-        rawfile.blocks['EXTPAR'][35] = self.points['meR'][modelnum] # mmuR := meR
-        rawfile.blocks['EXTPAR'][36] = self.points['mtauR'][modelnum]
-        rawfile.blocks['EXTPAR'][41] = self.points['mqL1'][modelnum]
-        rawfile.blocks['EXTPAR'][42] = self.points['mqL1'][modelnum] # mqL2 := mqL1
-        rawfile.blocks['EXTPAR'][43] = self.points['mqL3'][modelnum]
-        rawfile.blocks['EXTPAR'][44] = self.points['muR'][modelnum]
-        rawfile.blocks['EXTPAR'][45] = self.points['muR'][modelnum] # mcR := muR
-        rawfile.blocks['EXTPAR'][46] = self.points['mtR'][modelnum]
-        rawfile.blocks['EXTPAR'][47] = self.points['mdR'][modelnum]
-        rawfile.blocks['EXTPAR'][48] = self.points['mdR'][modelnum] # msR := mdR
-        rawfile.blocks['EXTPAR'][49] = self.points['mbR'][modelnum]
-        
-        preppedfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha" 
-        pyslha.write(preppedfile, rawfile)
-        
-        return True
-    
+
+        point = {key: self.points[key][modelnum] for key in self.points}
+        preppedfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
+
+        return toolsteps.run_prep_input(point=point, rawfilen=self.rawfilen, outfile=preppedfile)
+
     def run_SPheno(self, modelnum: int, **kwargs) -> bool:
         '''Run SPheno and return True if successful. Re-add input blocks to output file if successful. Relevant for running tools on output file.'''
-        
+
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
         logfile = f"{self.scan_dir}/{kwargs['log_dir']}/{modelnum}.log"
-        success = False
-        
-        # run SPheno
-        os.system(f"SPheno {infile} {outfile} &> {logfile}")
 
-        # Check that output file was actually produced
-        if not os.path.exists(outfile):
-            success = False
-        else:
-            # Check logfile for known error messages
-            with open(logfile, 'r') as file: loglines = file.read()
-            if "There has been a problem during the run." in loglines.strip() or "The error has occured" in loglines.strip(): success = False
-            else: success = True
+        return toolsteps.run_SPheno(infile=infile, outfile=outfile, logfile=logfile, rawfilen=self.rawfilen)
 
-        # Validate output using same pyslha parsing as ntupling readSLHA
-        if success:
-            try:
-                pyslha.readSLHAFile(outfile, ignorenomass=True)
-            except:
-                success = False
-
-        # Re-add input blocks needed for other tools since SPheno swallows them:
-        if success: addinputblocks(infile=outfile, blocksfile=self.rawfilen)
-        
-        return success
-    
     def run_softsusy(self, modelnum: int, **kwargs) -> bool:
         '''Run softsusy and return True if successful.'''
-        
+
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
-        success = False
-        
-        retcode = os.system(f"softpoint.x leshouches < {infile} &> {outfile}")
-        if retcode == 0: success = True
 
-        # Validate output using same pyslha parsing as ntupling readSLHA
-        if success:
-            try:
-                pyslha.readSLHAFile(outfile, ignorenomass=True)
-            except:
-                success = False
+        return toolsteps.run_softsusy(infile=infile, outfile=outfile)
 
-        return success
-    
     def run_micromegas(self, modelnum: int, **kwargs) -> bool:
         '''Run micromegas and return True if successful.'''
-        
+
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile_raw = f"{self.scan_dir}/{kwargs['output_dir']}_raw/{modelnum}.out"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.csv"
-        
-        # Run micromegas to get the raw, humanly readable output
-        os.system(f"main {infile} > {outfile_raw}")
-        
-        # Extract values into outfile
-        success = microextract(infilen = outfile_raw, outfilen = outfile)
-        
-        return success
-    
+
+        return toolsteps.run_micromegas(infile=infile, outfile_raw=outfile_raw, outfile=outfile)
+
     def run_superiso(self, modelnum: int, **kwargs) -> bool:
         '''Run superiso and return True if successful.'''
-        
+
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.flha"
-        success = False
-        
-        # Run superiso and pipe humanly readable output into null
-        os.system(f"slha.x {infile} &>/dev/null")
-        # Move the auto-generated output file into the right location
-        retcode = os.system(f"mv output.flha {outfile} &>/dev/null")
-        if retcode == 0: success = True
-        
-        return success
-    
-    # def run_feynhiggs(self, modelnum: int, **kwargs) -> bool:
-    #     '''Run FeynHiggs and return True if successful.'''
 
-    #     infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
-    #     outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
-    #     logfile = f"{self.scan_dir}/{kwargs['log_dir']}/{modelnum}.log"
-    #     success = False
+        return toolsteps.run_superiso(infile=infile, outfile=outfile)
 
-    #     # Run FeynHiggs - it writes output to stdout which we capture in outfile
-    #     retcode = os.system(f"FeynHiggs {infile} > {outfile} 2> {logfile}")
-    #     if retcode == 0: success = True
-
-    #     return success
     def run_feynhiggs(self, modelnum: int, **kwargs) -> bool:
         '''Run FeynHiggs and return True if successful. Re-add input blocks to output file if successful.'''
 
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
         logfile = f"{self.scan_dir}/{kwargs['log_dir']}/{modelnum}.log"
-        success = False
 
-        # Run FeynHiggs with default flags (42423120 = full MSSM, 2-loop, recommended settings)
-        # FeynHiggs creates output file with .fh-001 extension automatically
-        retcode = os.system(f"FeynHiggs {infile} 42423120 &> {logfile}")
+        return toolsteps.run_feynhiggs(infile=infile, outfile=outfile, logfile=logfile, rawfilen=self.rawfilen)
 
-        # Check return code first (simple success indicator)
-        if retcode != 0:
-            return False
-
-        # FeynHiggs writes output to inputfile.fh-001
-        fh_output = f"{infile}.fh-001"
-        if not os.path.exists(fh_output):
-            return False
-
-        # Parse logfile for error indicators
-        with open(logfile, 'r') as file:
-            loglines = file.read()
-
-        # Check for common FeynHiggs error patterns
-        error_patterns = [
-            "ERROR",
-            "FAILED",
-            "Segmentation fault",
-            "invalid",
-            "cannot",
-            "Error on line"
-        ]
-
-        if any(pattern in loglines for pattern in error_patterns):
-            success = False
-        else:
-            success = True
-
-        # Move FeynHiggs output to the expected location
-        if success:
-            os.system(f"mv {fh_output} {outfile}")
-            # Re-add input blocks that FeynHiggs might remove (like SPheno does)
-            addinputblocks(infile=outfile, blocksfile=self.rawfilen)
-
-        return success
-    
     def run_gm2calc(self, modelnum: int, **kwargs) -> bool:
         '''Run GM2Calc and return True if successful.'''
-        
+
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
-        success = False
-        
-        # Run superiso and pipe humanly readable output into null
-        retcode = os.system(f"gm2calc.x --slha-input-file={infile} > {outfile}")
-        if retcode == 0: success = True
-        
-        return success
-    
+
+        return toolsteps.run_gm2calc(infile=infile, outfile=outfile)
+
     def run_evade(self, modelnum: int, **kwargs) -> bool:
         '''Run EVADE and return True if successful.'''
-        
+
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.tsv"
         evade_conffile = f"{self.scan_dir}/{kwargs['output_dir']}_config/{modelnum}.cfg"
         evade_infile = f"{self.scan_dir}/{kwargs['output_dir']}_evade_in/{modelnum}.in"
-        success = False
-        
-        # Convert .slha file into EVADE compatible input
-        convert_slha(infile, evade_infile, evade_conffile, outfile)
-        
-        # Run evade and pipe humanly readable output into null
-        retcode = os.system(f"EVADE_MSSM {evade_conffile} &>/dev/null")
-        if retcode == 0: success = True
-        
-        return success
-    
+
+        return toolsteps.run_evade(infile=infile, outfile=outfile, evade_conffile=evade_conffile, evade_infile=evade_infile)
+
     def run_SModelS(self, modelnum: int, **kwargs) -> bool:
         '''Run SModelS and return True if successful.'''
-        
-        # Replace handlers of the library
-        lib_logger = logging.getLogger("smodels")
-        lib_logger.handlers = [StructlogHandler()]
-        lib_logger.propagate = False
-        lib_logger.setLevel(logging.INFO)
-        
+
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outputDir = f"{self.scan_dir}/{kwargs['output_dir']}/"
         smodels_config = f"{datadir}/SModelS_parameters.ini"
-        success = False
-        
-        # Import those parts of smodels that are needed for this exercise
-        from smodels.matching import modelTester
-        from smodels.base import runtime
-        from smodels.tools import particlesLoader
-        from importlib import reload
-        
-        # Import those parts of smodels that are needed for this exercise
-        from smodels.tools import xsecComputer
-        from smodels.base.physicsUnits import TeV, fb
-        from smodels.installation import installDirectory
-        from smodels.tools.xsecComputer import LO, NLL
-        # logging.getLogger("smodels").setLevel(logging.CRITICAL) # TODO: Need to find a way to clean up SModelS printout
-        
-        # Lets compute the NLL cross-sections for 13 TeV. The xsecComputer will first use Pythia to compute
-        # the LO cross-sections and then NLLfast to compute the k-factors.
-        # The output will contain only the processes contained in NLLfast (gluino and squark production)
-        # For the Pythia step we have to define the number of MC events (1k)
-        # (To see how to also include LO cross-sections for all processes check the LO HowTo)
-        computer = xsecComputer.XSecComputer ( maxOrder=NLL, nevents = 10_000, pythiaVersion=8 )
-        
-        # Try computing xsecsNLL, will fail for missing inputs
-        try:
-            xsecsNLL=computer.compute(sqrts = 13*TeV, slhafile=infile )
-        except:
-            success = False
-            return success
-        
-        # If all relevant xsecs are 0, computer.compute() will return an empty list. Set SModelS to fail in this case:
-        if xsecsNLL == []:
-            success = False
-            return success
-        
-        # Finally, lets write the cross-sections back to the file 
-        # (will write only the cross-sections not overlapping the existing ones):
-        computer.addXSecToFile(xsecsNLL,infile)
-        
-        #Read and check parameter file, exit parameterFile does not exist
-        parser = modelTester.getParameters(smodels_config)
-        
-        #Change option:
-        # parser.set('printer','outputtype','summary')
-        parser.set('printer','outputtype','python')
-        
-        #Determine particles module from ini file, if necessary """
-        if parser.has_option("particles","model"):
-            runtime.modelFile = parser.get( "particles", "model" )
-            reload(particlesLoader)
 
-        #Load the database defined in the parameters file, exit if not found """
-        database = modelTester.loadDatabase(parser,db=None)
-        
-        #run SModelS with input file:
-        output = modelTester.testPoint(infile, outputDir, parser, database)
-        
-        # As we're not exiting the program, let's make sure all output is flushed
-        [ x.flush() for x in output.values() ]
-        
-        success = True
-        return success
+        # xsec_dest=None: legacy in-place xsec injection into the SPheno output —
+        # correct here because the sequential per-model loop has already run every
+        # other SPheno consumer for this model.
+        return toolsteps.run_SModelS(infile=infile, output_dir=outputDir, smodels_ini=smodels_config, xsec_dest=None)
     
     def generate_models(self) -> None:
         '''Main function to generate models.'''
         
         log.info(f"Starting Model Generation...")
         
-        # Set up directories for saving scan
+        # Set up directories for saving scan. The destructive wipe is a legacy-CLI
+        # behavior (a fresh scan overwrites the scan dir); the Snakemake rules own
+        # their outputs incrementally and call _setup_scan_dirs() directly instead.
         log.info(f"Setting up output directories for scan")
         os.system(f"rm -r {self.scan_dir} &>/dev/null")
-        os.makedirs(self.scan_dir)
-        
-        for step in self.steps:
-            dirns = ['output_dir', 'log_dir']
-            for dirn in dirns:
-                if dirn in step: os.makedirs(f"{self.scan_dir}/{step[dirn]}")
-                if dirn in step and "micromegas" in step['name']: os.makedirs(f"{self.scan_dir}/{step[dirn]}_raw")
-                if dirn in step and "evade" in step['name']: 
-                    os.makedirs(f"{self.scan_dir}/{step[dirn]}_config")
-                    os.makedirs(f"{self.scan_dir}/{step[dirn]}_evade_in")
+        self._setup_scan_dirs()
         
         if self.prior == 'flat':
             self.sample_flat()
@@ -1121,7 +713,9 @@ class ModelGenerator:
     def _dump_scan_config(self) -> None:
         '''Dump scan configuration to YAML file in scan directory.'''
         with open(f"{self.scan_dir}/scan_config.yaml", "w") as file:
-            skipkeys = ['points']
+            # 'quiet' is a logging knob, not scan configuration — keep the
+            # dumped yaml identical to the legacy format
+            skipkeys = ['points', 'quiet']
             dumpdict = {key: value for key, value in vars(self).items() if key not in skipkeys}
             yaml.dump(dumpdict, file, default_flow_style=None, encoding=None)
     

@@ -11,3 +11,6 @@ https___smodels_github_io_database_official311
 # Python bytecode
 __pycache__/
 *.py[cod]
+# Snakemake workflow state/bookkeeping
+.snakemake/
+.r3mg/
