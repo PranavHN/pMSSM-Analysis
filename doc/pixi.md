@@ -10,8 +10,10 @@ This document describes how Run3ModelGen uses [pixi](https://pixi.sh/) to manage
 | Enter the default shell | `pixi shell` |
 | Build the project | `pixi run build` |
 | Generate models | `pixi run genModels` |
+| Drive snakemake directly | `pixi run smk <snakemake args>` |
 | Clean build & run dirs | `pixi run clean` |
 | Enter the ROOT environment | `pixi shell -e rootenv` |
+| Install the DAG-rendering env | `pixi install -e dagviz` (also done by `pixi run build`) |
 | Add a dependency | `pixi add <package>` |
 | List installed packages | `pixi list` |
 
@@ -38,7 +40,7 @@ For alternative installation methods (Homebrew, Windows, etc.), see the [pixi in
 
 ## Environments
 
-Run3ModelGen defines two pixi environments:
+Run3ModelGen defines three pixi environments:
 
 ### Default environment
 
@@ -77,6 +79,29 @@ root_base = ">=6.40.0,<7"
 rootenv = { features = ["rootenv"], no-default-feature = true }
 ```
 
+### `dagviz` environment
+
+A standalone graphviz install used to render the workflow's DAG snapshots
+(`snakemake --dag | pixi run -e dagviz dot -Tsvg > dag.svg`; the automatic
+per-run `dag.svg` also uses it when installed — see
+[snakemake.md](snakemake.md)). It is deliberately isolated: graphviz's GUI
+dependency stack cannot coexist with xrootd 6.x. Neither package depends on the
+other; they compete over `libxml2`, of which an environment holds exactly one:
+
+    graphviz 12.2.1  -> gtk3, pango, which are built against libxml2 <2.14
+    xrootd   6.1.0   -> libxml2-16 >=2.14.6, libcurl >=8.21.0, krb5 >=1.22.2
+    xrootd   5.8.4   -> libxml2 >=2.13.8,<2.14, libcurl >=8.14.1, krb5 >=1.21.3
+
+So adding graphviz to the default environment makes xrootd 6.1.0 unsolvable and
+the solver quietly falls back to the 5.x line. Measured with a trial solve:
+xrootd 6.1.0 -> 5.8.4, libcurl 8.21 -> 8.18, krb5 1.22.2 -> 1.21.3 (plus
+libxml2, libllvm19 and zeromq), and 40 added packages (gtk3, cairo, pango,
+gdk-pixbuf, libcups). xrootd is what `--publish` uses to reach EOS, so that
+trade is not worth a rendered graph.
+
+`pixi run build` installs this environment as part of a normal build; the
+standalone command is `pixi install -e dagviz` (once per machine/checkout).
+
 For more on pixi multi-environment support, see the [pixi environments documentation](https://pixi.sh/latest/features/multi-environment/).
 
 ## Tasks
@@ -90,8 +115,12 @@ pixi tasks provide reproducible, single-command workflows. They are defined in `
 | `build` | `pixi run build` | Configures and compiles the project with cmake. On Linux, uses all available cores minus one. |
 | `genModels` | `pixi run genModels` | Sources the build environment, creates a `run/` directory, and runs `genModels.py`. |
 | `extractModels` | `pixi run extractModels` | Sources the build environment and runs `extractModels.py` with default arguments. |
+| `smk` | `pixi run smk <args>` | Direct snakemake access for power users: sources the build environment, runs from `run/`, passes all arguments through to `snakemake -s ../workflow/Snakefile` (see [snakemake.md](snakemake.md)). |
+| `test` | `pixi run test` | The full offline check suite via `tests/run_checks.sh`: unit tests (`tests/`, including the sampled-point golden file) and workflow DAG dry-runs in every mode. Seconds, no physics tools or cluster needed. The CI dry-run job runs the *same script*, so local and CI cannot drift. Requires a prior `pixi run build` (the package is assembled under `build/`). |
 | `clean` | `pixi run clean` | Removes the `build/` and `run/` directories. |
 | `genModels-clean` | `pixi run genModels-clean` | Runs `clean`, `build`, and `genModels` in sequence (full rebuild + generate). |
+| `make-refs` | `pixi run make-refs` | Produces the CI reference scans and prints their per-step success counts (manual, no upload). |
+| `upload-refs` | `pixi run upload-refs` | Uploads the references produced by `make-refs` to the shared EOS area (manual, needs credentials — see the README). |
 | `setup-pythia8` | `pixi run setup-pythia8` | Repairs/builds SModelS's bundled pythia8 (see [pythia8.md](pythia8.md)). Normally runs automatically during the build and on `source build/setup.sh`. |
 
 ### Platform-specific overrides
@@ -155,13 +184,20 @@ pixi list -e rootenv         # List packages in rootenv
 
 | Category | Packages |
 | --- | --- |
-| Compilers | `gcc`, `gfortran`, `cxx-compiler` (Linux only) |
+| Compilers | `gcc` (Linux only), `gfortran`, `cxx-compiler` |
 | Build tools | `cmake`, `make`, `automake`, `patch` |
-| C++ libraries | `boost`, `eigen`, `libconfig` (Linux only) |
+| C++ libraries | `boost`, `eigen`, `libconfig` |
 | Python | `python 3.11` |
-| Python packages | `pyyaml`, `pyslha`, `uproot`, `pandas`, `scipy`, `click`, `rich`, `structlog`, `colorama`, `ipykernel` |
-| Physics | `spheno-atlas`, `softsusy`, `superiso`, `feynhiggs`, `gm2calc-python`, `smodels` |
-| Utilities | `which`, `git` |
+| Python packages | `pyyaml`, `pyslha`, `uproot`, `pandas`, `scipy`, `numpy` (pinned — see below), `click`, `rich`, `structlog`, `colorama`, `ipykernel` |
+| Physics | `spheno-atlas`, `softsusy`, `superiso`, `feynhiggs` (Linux only), `gm2calc-python`, `smodels` |
+| Workflow | `snakemake-minimal`, `snakemake-executor-plugin-slurm` (Linux only), `snakemake-executor-plugin-htcondor` (Linux only, via PyPI — its conda dependency `python-htcondor` has no py3.11 build) |
+| Utilities | `which`, `git`, `xrootd` (provides `xrdcp` for the EOS reference files) |
+
+**Why numpy is pinned exactly:** the sampled parameter points come from
+`np.random` streams, and the CI regression check compares per-step success
+counts against frozen references — a numpy version bump could silently change
+every sampled point. Bump the pin only together with a reference regeneration
+(`make-refs`/`upload-refs`).
 
 **rootenv environment:**
 
@@ -172,23 +208,29 @@ pixi list -e rootenv         # List packages in rootenv
 
 ## Channels
 
-Run3ModelGen uses the [conda-forge](https://conda-forge.org/) channel exclusively:
-
 ```toml
-channels = ["conda-forge"]
+channels = ["conda-forge", "bioconda"]
 ```
 
-conda-forge is a community-maintained collection of conda packages. All dependencies, including compilers and physics software, are sourced from this channel.
+Channel order is priority order: every pre-existing package resolves from
+[conda-forge](https://conda-forge.org/) (compilers, physics software, Python
+stack); [bioconda](https://bioconda.github.io/) only supplies the snakemake
+workflow engine and the SLURM executor plugin. The HTCondor executor plugin
+comes from PyPI (`[target.linux-64.pypi-dependencies]`) because its conda
+dependency `python-htcondor` has no Python 3.11 build.
 
 ## Platforms
 
-Currently only `linux-64` is supported:
-
 ```toml
-platforms = ["linux-64"]
+platforms = ["linux-64", "osx-64"]
 ```
 
-Support for `osx-64` and `osx-arm64` is planned but not yet available (the external physics software needs porting).
+`osx-64` also runs under Rosetta on Apple Silicon; native `osx-arm64` is not
+supported (no conda-forge feynhiggs build for macOS, and the pinned
+gcc/gfortran 13.2 toolchain only exists for linux-64/osx-64). On macOS the
+`feynhiggs` pipeline step is dropped from the workflow automatically, and only
+the local execution backend is available (the executor plugins are
+linux-only).
 
 ## Common workflows
 

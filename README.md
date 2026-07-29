@@ -1,6 +1,6 @@
 # Run3ModelGen <!-- omit in toc -->
 
-Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be fully independent of HTCondor & lxplus as well as being fully Dockerised.
+Modern pMSSM model generation, orchestrated by a [Snakemake](https://snakemake.readthedocs.io) workflow: the same entrypoints run locally, on SLURM, or on HTCondor (`--backend`), with resumable scans and per-step re-runs. Fully independent of lxplus, fully Dockerised.
 
 # Table of Contents <!-- omit in toc -->
 
@@ -10,6 +10,7 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
   - [Environments](#environments)
 - [On startup](#on-startup)
 - [Running](#running)
+  - [Commands](#commands)
   - [Sampling priors](#sampling-priors)
   - [Changing the scan configuration](#changing-the-scan-configuration)
   - [MCMC sampling](#mcmc-sampling)
@@ -19,9 +20,8 @@ Draft repo for updated shiny pMSSM model generation. Aiming for this repo to be 
   - [Extracting interesting models](#extracting-interesting-models)
     - [From scan directories](#from-scan-directories)
     - [From .tar balls directly](#from-tar-balls-directly)
-  - [HTCondor](#htcondor)
-    - [Generating models](#generating-models)
-    - [Extracting models](#extracting-models)
+  - [Batch running (SLURM / HTCondor)](#batch-running-slurm--htcondor)
+    - [Extracting models from a published run](#extracting-models-from-a-published-run)
 - [Documentation](#documentation)
 - [Reference files \& CI regression check](#reference-files--ci-regression-check)
 - [FAQ](#faq)
@@ -65,18 +65,27 @@ Please note that since pixi edits your `.bash_profile` automatically, it should 
 
 ## Run3ModelGen
 
-Having installed pixi, we can use the `pixi.toml` and `pixi.lock` files to start a shell with the correct environment and install the Run3ModelGen:
+Having installed pixi, we can use the `pixi.toml` and `pixi.lock` files to start a shell with the correct environment and install the Run3ModelGen. Either let the `build` task do it:
+
+```bash
+pixi run build            # cmake configure + build, and installs the dagviz env
+pixi shell
+source build/setup.sh
+```
+
+or run the build commands yourself, which is the same thing spelled out:
 
 ```bash
 pixi shell
 cmake -S source -B build
 cmake --build build -j8
 source build/setup.sh
+pixi install -e dagviz    # what the task adds: renders each run's DAG as SVG
 ```
 
 ## Environments
 
-The project provides two pixi environments:
+The project provides three pixi environments:
 
 **Default environment** — contains the full build toolchain (compilers, cmake), all Python dependencies, and the external physics software. This is what you use for building and running scans. ROOT ntuples are produced and read using [uproot](https://uproot.readthedocs.io/), a pure-Python library for ROOT file I/O that does **not** require a ROOT installation. uproot is included in the default environment automatically.
 
@@ -87,7 +96,15 @@ pixi shell -e rootenv                    # Enter the ROOT environment
 pixi run -e rootenv python my_analysis.py  # Run a script in rootenv
 ```
 
-Since `rootenv` is defined with `no-default-feature = true`, it is fully independent of the default environment and resolves quickly. For more details on both environments, see [doc/pixi.md](doc/pixi.md).
+**`dagviz` environment** — [graphviz](https://graphviz.org/) only, used to render the DAG snapshot every run writes. `pixi run build` installs it for you; the manual equivalent is:
+
+```bash
+pixi install -e dagviz
+```
+
+Nothing in it touches xrootd; it is separate because graphviz and xrootd cannot *share* one environment. graphviz pulls GTK3/pango, which are still built against the old `libxml2` (`<2.14`), while xrootd 6.x needs `libxml2-16 >=2.14.6` — and an environment holds only one `libxml2`. Adding graphviz to the default environment therefore downgrades xrootd 6.1.0 → 5.8.4 (measured, plus `libcurl` and `krb5`, and 40 extra packages on every worker node), and xrootd is what `--publish` uses to reach EOS. With `dagviz` installed, every run renders its own `dag.svg` alongside the `dag.dot` source.
+
+Both `rootenv` and `dagviz` are defined with `no-default-feature = true`, so they are fully independent of the default environment and resolve quickly. For more details on the environments, see [doc/pixi.md](doc/pixi.md).
 
 # On startup
 
@@ -113,7 +130,41 @@ The main script for generating models is [genModels.py](source/Run3ModelGen/scri
 genModels.py
 ```
 
-The script will save the created model files and the corresponding root ntuple.
+The script will save the created model files and the corresponding root ntuple in the scan directory. It is the single entrypoint for every execution backend — locally or submitted to a cluster — via `--backend`:
+
+```bash
+genModels.py --config_file myconfig.yaml --num_jobs 50 --backend slurm     # or htcondor / local
+```
+
+See [Batch running](#batch-running-slurm--htcondor) below. Under the hood, execution is orchestrated by a [Snakemake](https://snakemake.readthedocs.io) workflow ([workflow/](workflow/)) in which every pipeline tool is its own rule — interrupted scans resume, and individual steps can be re-run without redoing the whole pipeline using [rerunStep.py](source/Run3ModelGen/scripts/rerunStep.py) (original config/seed are recovered from the scan's `scan_config.yaml`):
+
+```bash
+rerunStep.py --step micromegas --scan_dir scan     # re-runs micromegas + everything after it
+rerunStep.py --step ntuple --scan_dir scan         # only rebuild the ntuple
+```
+
+Every run saves its DAG into the scan dir (`dag.dot`, plus `dag.svg` once the [`dagviz` environment](#environments) is installed). Power users can drive the workflow directly with snakemake (`pixi run smk ...`); see [doc/snakemake.md](doc/snakemake.md) for the full guide: config keys, profiles, reproducibility.
+
+## Commands
+
+Everything below is on your `PATH` after `source build/setup.sh`; each takes `--help`.
+
+| Command | What it does |
+| --- | --- |
+| [`genModels.py`](source/Run3ModelGen/scripts/genModels.py) | Generate models — one scan, or `--num_jobs N` batches, on `--backend local\|slurm\|htcondor`, optionally `--publish`ing to EOS. See [Batch running](#batch-running-slurm--htcondor). |
+| [`rerunStep.py`](source/Run3ModelGen/scripts/rerunStep.py) | Re-run one pipeline step of an existing scan plus everything after it, then rebuild the ntuple. |
+| [`extractModels.py`](source/Run3ModelGen/scripts/extractModels.py) | Extract selected models for the pMSSMFactory — from one scan dir/tarball, or a whole published run with `--eos_dir`. See [Extracting interesting models](#extracting-interesting-models). |
+| [`genConfig.py`](source/Run3ModelGen/scripts/genConfig.py) | Write an example config for a given prior to start from. See [Changing the scan configuration](#changing-the-scan-configuration). |
+| [`mcmc_diagnostics.py`](source/Run3ModelGen/scripts/mcmc_diagnostics.py) | MCMC convergence diagnostics (split-R̂, bulk-ESS) across chain ntuples. See [Diagnostics](#diagnostics). |
+
+Plus these pixi tasks, which need no sourced environment:
+
+| Task | What it does |
+| --- | --- |
+| `pixi run build` | Configure and compile (micrOMEGAs, pythia8, `build/setup.sh`). |
+| `pixi run test` | Offline check suite: unit tests, the sampled-point golden file, and a DAG dry-run of every workflow mode (seconds; identical to what CI runs). |
+| `pixi run smk <args>` | Direct snakemake access for cases the scripts do not expose. |
+| `pixi run make-refs` / `upload-refs` | Maintainers: regenerate and upload the CI reference files. See [Reference files & CI regression check](#reference-files--ci-regression-check). |
 
 ## Sampling priors
 
@@ -303,36 +354,36 @@ Please note that as of now, the selection has to be supplied in a format that ca
 extractModels.py --scan_dir /eos/user/j/jwuerzin/Run3ModelGen/15280231/0/scan.15280231.0.tar.gz --root_file /eos/user/j/jwuerzin/Run3ModelGen/15280231/0/ntuple.15280231.0.root --selection "akarr['SP_m_h'] < 125."
 ```
 
-## HTCondor
+## Batch running (SLURM / HTCondor)
 
-### Generating models
+For larger scans, `genModels.py` fans out over batch jobs — same script, any backend:
 
-For larger scans, parallel jobs can be submitted with [genModels_condor.py](source/Run3ModelGen/scripts/genModels_condor.py):
 ```bash
-genModels_condor.py --config_file myconfig.yaml --condor_dir condorlogdir --num_jobs 42
+genModels.py --config_file myconfig.yaml --num_jobs 42 --backend htcondor --publish
+genModels.py --config_file myconfig.yaml --num_jobs 42 --backend slurm --scan_dir /ptmp/$USER/myrun
 ```
 
-This will automatically submit `num_jobs` to the HTCondor batch system, while storing the relevant outputs in `condorlogdir`. Please note that since each config file contains `num_models` models, this will overall result in `num_jobs` x `num_models` attempted models.
+- Each of the `num_jobs` batches generates `num_models` models (from the config) with its own reproducibly derived seed, as one cluster job, into `<scan_dir>/scan.<runid>.<b>/`. The run is identified by a digits-only `runid` (printed at submission; defaults to a timestamp; `--runid` to pin it) — `(runid, --base_seed, config)` reproducibly determine every sampled point of the run.
+- `--publish` (any backend) additionally tars every batch and **moves** tarball + ntuple + config to `$EOSPATH/<runid>/<b>/` — the layout the pMSSMFactory flow consumes. The batch's local scan dir and tarball are deleted once the published copies are verified (present and byte-for-byte the right size), so a published run occupies no space outside EOS: a 300-batch run of 10,000 models would otherwise leave ~340 GB behind, well over an AFS work quota. Only the small `r3mg/` bookkeeping stays, so re-running the same command is still a no-op rather than a regeneration. Pass `--keep_local` to keep the scan dirs too. Without `--publish`, the ntuples under `<scan_dir>` are the product and nothing is deleted.
+- On HTCondor the job flavour is set with `--flavour` (e.g. `espresso` for testing); SLURM partition/runtime defaults live in [workflow/profiles/slurm/config.yaml](workflow/profiles/slurm/config.yaml).
+- Cluster submissions detach a Snakemake orchestrator on the submit host (log: printed at submission; `--foreground` to stay attached). If it dies, running jobs finish on their own — **re-run the exact same command to resume**; finished batches are skipped. Changing the config or `--base_seed` under an existing `--runid` is refused (it would re-sample); use a new runid instead.
 
-The output .tar ball containing all models and the corresponding ntuple will automatically be stored in `$EOSPATH`, which is automatically defined during compilation in `build/setup.sh`.
+### Extracting models from a published run
 
-The HTCondor job flavour can be changed using the `--flavour` flag.
+A published run ($EOSPATH/<runid>/ with per-batch subdirs) is extracted batch-by-batch with the same script that handles single scans:
 
-### Extracting models
-
-Models produced with HTCondor can also be extracted with batch jobs. To do so, call [extractModels_condor.py](source/Run3ModelGen/scripts/extractModels_condor.py) with e.g.:
 ```bash
-extractModels_condor.py --eos_dir /eos/user/j/jwuerzin/Run3ModelGen/15280231 --selection "akarr['SP_m_h'] < 125."
+extractModels.py --eos_dir /eos/user/j/jwuerzin/Run3ModelGen/15280231 --backend htcondor --selection "akarr['SP_m_h'] < 125."
 ```
 
-The output `Models` directory can be fed into the pMSSMFactory directly and is stored in `$EOSPATH/SelectedModels/<ClusterId>/`. The corresponding config .yaml file is also stored there.
-
-The HTCondor job flavour can be changed using the `--flavour` flag.
+One extraction job per ProcId subdirectory; the output `Models` directory can be fed into the pMSSMFactory directly and is stored in `$EOSPATH/SelectedModels/<ClusterId>/`. Backend and flavour flags work exactly as for `genModels.py`.
 
 # Documentation
 
 Detailed documentation is available in the [doc/](doc/) directory:
 
+- [doc/snakemake.md](doc/snakemake.md) - Snakemake workflow: entrypoint flag reference (`--backend`, batch mode, resume), rule graph, profiles (local/slurm/htcondor), re-running steps, reproducibility, DAG snapshots
+- [workflow/README.md](workflow/README.md) - Workflow *sources* layout (for contributors): which rule lives in which `.smk`, the `r3mg_batch.py` subcommand interface, and the invariants a change must respect
 - [doc/ntuple.md](doc/ntuple.md) - NTuple structure: tree layout, branch naming, and per-tool branch groups
 - [doc/mcmc.md](doc/mcmc.md) - MCMC sampling algorithm, configuration, and output
 - [doc/constraints.md](doc/constraints.md) - Physics constraints specification (types, sources, examples)
@@ -419,8 +470,9 @@ The [cmake_build_env.sh](source/cmake_build_env.sh) script is automatically call
   - `PATH`: Adds the micrOMEGAs binary and the Run3ModelGen scripts (the other physics tools come from their conda-forge packages in the pixi environment)
   - `PYTHONPATH`: Adds the build directory for Python module imports
   - `DATAPATH`: Points to the Run3ModelGen data directory
-  - `EOSPATH`: Points to your EOS output directory
+  - `EOSPATH`: Points to your EOS output directory (a pre-set `$EOSPATH` wins over the default — e.g. to `--publish` to a non-EOS path)
   - `RUN3MODELGENDIR`: Points to the repository root directory
+  - `CONDOR_CONFIG`: set to `/dev/null` **only** on hosts with no HTCondor client, to silence the `htcondor2` config warning that snakemake's plugin discovery would otherwise print on every start. On lxplus (where `condor_submit` exists) it is left untouched so normal config discovery applies.
 
 **When it's called:**
 This script is executed automatically by CMake during the build process (`cmake --build build -j8`). The `-s` (source) and `-b` (build) directory arguments are provided by the CMake configuration.

@@ -75,6 +75,18 @@ restore_from_cache() {
   pythia8_is_built "$PYDIR"
 }
 
+# report the nothing-to-do case and publish to the cache. Called from both
+# already-built checks (before and under the lock), hence a function.
+announce_already_built() {
+  # SETUP_PYTHIA8_QUIET silences only this no-op line (set by the snakemake
+  # rule shells, which source build/setup.sh — and thus run this script —
+  # once per rule); real builds/restores always print.
+  if [ -z "${SETUP_PYTHIA8_QUIET:-}" ]; then
+    echo "[setup_pythia8] pythia8 already built in ${PYDIR} — nothing to do."
+  fi
+  save_to_cache   # populate the shared cache for later stages if not already there
+}
+
 # --- locate the installed smodels pythia8 dir --------------------------------
 PYBIN="$(command -v python || command -v python3 || true)"
 [[ -n "$PYBIN" ]] || { echo "[setup_pythia8] no python found; skipping."; exit 0; }
@@ -94,20 +106,47 @@ fi
 VER="$(tr -d '[:space:]' < pythiaversion)"      # e.g. 8317
 TARBALL="pythia${VER}.tgz"
 
+# --- fast path: already built? (checked BEFORE taking the lock) ---------------
+# This is by far the most common outcome (every build after the first, and every
+# snakemake rule shell), and it needs no lock: the check is a pure read and
+# pythia8_is_built only ever flips false->true. Checking it up front keeps a
+# no-op run from waiting on the lock at all — which matters because the lock is
+# only best effort: a leaked one used to wedge the build for the full 1200s even
+# though pythia8 was sitting right there, fully built. Re-checked under the lock
+# below to close the genuine build-vs-build race.
+if pythia8_is_built "$PYDIR"; then
+  announce_already_built
+  exit 0
+fi
+
 # --- serialize: never let two builds run in this dir at once -----------------
+# The lock file lives on NODE-LOCAL disk, not beside the artifact. On a local
+# filesystem flock is kernel-enforced and the kernel always drops the lock when
+# the holder dies. On AFS — where the pixi env lives on lxplus — the lock is held
+# by the *fileserver*, keyed per-FID, and survives a holder that exits without
+# releasing it; a leaked lock then blocked every later build (even a shared lock
+# was refused) until the timeout expired. Keying the path by a hash of $PYDIR
+# gives one lock per env. Trade-off: this serializes within a node, not across
+# them — AFS never did that dependably anyway, and the actual correctness guard
+# is the pythia8_is_built re-check below.
 # (skip locking gracefully if flock is unavailable, rather than aborting the build)
 if command -v flock >/dev/null 2>&1; then
-  exec 9>".setup_pythia8.lock"
-  if ! flock -w 1200 9; then
-    echo "[setup_pythia8] lock busy after 1200s; another build is running. Skipping." >&2
-    exit 0
+  LOCK_FILE="${TMPDIR:-/tmp}/.setup_pythia8.$(printf '%s' "$PYDIR" | cksum | cut -d' ' -f1).lock"
+  # append, never truncate: another build may be holding this very file
+  if : >>"$LOCK_FILE" 2>/dev/null; then
+    exec 9>>"$LOCK_FILE"
+    if ! flock -w 1200 9; then
+      echo "[setup_pythia8] lock busy after 1200s; another build is running. Skipping." >&2
+      exit 0
+    fi
+  else
+    echo "[setup_pythia8] WARNING: cannot create lock ${LOCK_FILE}; proceeding unserialized." >&2
   fi
 fi
 
 # already built? (re-checked here now that we hold the lock)
 if pythia8_is_built "$PYDIR"; then
-  echo "[setup_pythia8] pythia8 already built in ${PYDIR} — nothing to do."
-  save_to_cache   # populate the shared cache for later stages if not already there
+  announce_already_built
   exit 0
 fi
 

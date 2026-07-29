@@ -136,7 +136,7 @@ build_docker:
 genModels_flat_local:
   extends: .genmodels_local
   stage: genModels
-  needs: [build_local]
+  needs: [build_local, workflow_dryrun_local]
   script:
     - cd run
     - genModels.py --scan_dir scan_flat
@@ -149,7 +149,7 @@ genModels_flat_local:
 genModels_flat_docker:
   extends: .genmodels_docker
   stage: genModels
-  needs: [build_docker]
+  needs: [build_docker, workflow_dryrun_local]
   image: ${CI_IMAGE}
   script:
     - cd run
@@ -167,25 +167,11 @@ genModels_flat_docker:
 genModels_fixed_local:
   extends: .genmodels_local
   stage: genModels
-  needs: [build_local]
+  needs: [build_local, workflow_dryrun_local]
   script:
     - cd run
     - genModels.py --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --scan_dir scan_fixed
     - compare_reference.py --scan fixed
-  artifacts:
-    paths:
-      - run/scan_fixed
-    expire_in: 1 day
-
-genModels_fixed_docker:
-  extends: .genmodels_docker
-  stage: genModels
-  needs: [build_docker]
-  image: ${CI_IMAGE}
-  script:
-    - cd run
-    - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --scan_dir scan_fixed
-    - pixi run compare_reference.py --scan fixed
   artifacts:
     paths:
       - run/scan_fixed
@@ -198,7 +184,7 @@ genModels_fixed_docker:
 genModels_mcmc_local:
   extends: .genmodels_local
   stage: genModels
-  needs: [build_local]
+  needs: [build_local, workflow_dryrun_local]
   script:
     - cd run
     - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml --scan_dir scan_mcmc
@@ -211,7 +197,7 @@ genModels_mcmc_local:
 genModels_mcmc_docker:
   extends: .genmodels_docker
   stage: genModels
-  needs: [build_docker]
+  needs: [build_docker, workflow_dryrun_local]
   image: ${CI_IMAGE}
   script:
     - cd run
@@ -229,25 +215,11 @@ genModels_mcmc_docker:
 genModels_grid_local:
   extends: .genmodels_local
   stage: genModels
-  needs: [build_local]
+  needs: [build_local, workflow_dryrun_local]
   script:
     - cd run
     - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_grid_config.yaml --scan_dir scan_grid
     - compare_reference.py --scan grid
-  artifacts:
-    paths:
-      - run/scan_grid
-    expire_in: 1 day
-
-genModels_grid_docker:
-  extends: .genmodels_docker
-  stage: genModels
-  needs: [build_docker]
-  image: ${CI_IMAGE}
-  script:
-    - cd run
-    - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_grid_config.yaml --scan_dir scan_grid
-    - pixi run compare_reference.py --scan grid
   artifacts:
     paths:
       - run/scan_grid
@@ -260,7 +232,7 @@ genModels_grid_docker:
 genModels_importance_local:
   extends: .genmodels_local
   stage: genModels
-  needs: [build_local]
+  needs: [build_local, workflow_dryrun_local]
   script:
     - cd run
     - cp ../source/Run3ModelGen/data/configs/ci_importance_seeds.csv .
@@ -271,20 +243,78 @@ genModels_importance_local:
       - run/scan_importance
     expire_in: 1 day
 
-genModels_importance_docker:
-  extends: .genmodels_docker
+# ---------------------------------------------------------------------------
+# genModels stage — snakemake workflow contracts (batch mode + DAG dry-runs)
+# ---------------------------------------------------------------------------
+
+# Multi-batch fan-out coverage the single-scan jobs can't provide, exercised
+# through the real user surface (genModels.py --backend/--num_jobs/--publish):
+# per-batch ntuple naming, b*100000 model-id offsets, tarball member layout
+# with the SModelS_xsec -> SPheno/ fold-back, the EOS publish layout, and the
+# extract fan-out + extractModels' tarball path.
+genModels_batch_local:
+  extends: .genmodels_local
   stage: genModels
-  needs: [build_docker]
-  image: ${CI_IMAGE}
+  needs: [build_local, workflow_dryrun_local]
   script:
     - cd run
-    - cp ../source/Run3ModelGen/data/configs/ci_importance_seeds.csv .
-    - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_importance_config.yaml --scan_dir scan_importance
-    - pixi run compare_reference.py --scan importance
-  artifacts:
-    paths:
-      - run/scan_importance
-    expire_in: 1 day
+    # --keep_local: the assertions below read the local tarball/scan dir, which a
+    # plain --publish deliberately deletes (that path is covered separately at the
+    # end of this job).
+    - EOSPATH=$PWD/fake_eos_pub genModels.py --backend local --num_jobs 2 --runid 90001 --base_seed 123 --scan_dir batchtest --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --publish --keep_local
+    # NB: no `tar ... | grep -q` pipelines — grep -q's early exit SIGPIPEs tar,
+    # and the runner's pipefail turns that into exit 141. List/extract to a file first.
+    - tar -tzf batchtest/scan.90001.1.tar.gz > tar_members.txt
+    - grep -q 'scan.90001.1/ntuple.90001.1.root' tar_members.txt
+    - "! grep -q SModelS_xsec tar_members.txt"
+    - tar -xzOf batchtest/scan.90001.1.tar.gz scan.90001.1/SPheno/0.slha > spheno0_check.slha
+    - grep -q XSECTION spheno0_check.slha
+    - python -c "import uproot; ids = uproot.open('batchtest/scan.90001.1/ntuple.90001.1.root:susy')['model'].array(library='np').astype(int).tolist(); assert ids == [100000, 100001, 100002], ids"
+    - test -f fake_eos_pub/90001/1/scan.90001.1.tar.gz && test -f fake_eos_pub/90001/1/ntuple.90001.1.root && test -f fake_eos_pub/90001/scan_config.yaml
+    - EOSPATH=$PWD/fake_eos_sel extractModels.py --backend local --eos_dir $PWD/fake_eos_pub/90001 --selection "akarr['SS_m_h']!=-1"
+    - test -f fake_eos_sel/SelectedModels/90001/Models/SPheno/1/100000.slha
+    - EOSPATH=$PWD/fake_eos_single extractModels.py --scan_dir batchtest/scan.90001.1.tar.gz --root_file batchtest/scan.90001.1/ntuple.90001.1.root --selection "akarr['SS_m_h']!=-1"
+    - test -f fake_eos_single/SelectedModels/90001/Models/SPheno/1/100000.slha
+    # Selective re-run: gm2calc onwards must re-run (manifests deleted + rebuilt)
+    # while the upstream steps stay untouched, and the ntuple is regenerated.
+    - cp batchtest/r3mg/scan.90001.0/step_SPheno.json spheno_manifest_before.json
+    - rerunStep.py --step gm2calc --scan_dir batchtest/scan.90001.0
+    # NB: compare with python, not cmp/diff — diffutils is in neither the CI base
+    # image nor the pixi environment (cmp exits 127 there).
+    - python -c "import pathlib, sys; a = pathlib.Path('spheno_manifest_before.json').read_bytes(); b = pathlib.Path('batchtest/r3mg/scan.90001.0/step_SPheno.json').read_bytes(); sys.exit(0 if a == b else 'SPheno manifest changed - rerunStep re-ran an upstream step it should not have touched')"
+    - test -f batchtest/r3mg/scan.90001.0/step_gm2calc.json && test -f batchtest/scan.90001.0/ntuple.90001.0.root
+    - python -c "import uproot; ids = uproot.open('batchtest/scan.90001.0/ntuple.90001.0.root:susy')['model'].array(library='np').astype(int).tolist(); assert ids == [0, 1, 2], ids"
+    # Default --publish (no --keep_local) is a MOVE: nothing may be left outside
+    # EOS afterwards except the r3mg bookkeeping, and re-running must NOT
+    # regenerate the batches it just deleted (the scan dirs are gone, so a
+    # regression here would re-run the whole scan instead of being a no-op).
+    - EOSPATH=$PWD/fake_eos_move genModels.py --backend local --num_jobs 2 --runid 90002 --base_seed 123 --scan_dir movetest --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --publish
+    - test -f fake_eos_move/90002/1/scan.90002.1.tar.gz && test -f fake_eos_move/90002/1/ntuple.90002.1.root && test -f fake_eos_move/90002/scan_config.yaml
+    - "! test -e movetest/scan.90002.1"
+    - "! test -e movetest/scan.90002.1.tar.gz"
+    - test -f movetest/r3mg/scan.90002.1/step_SModelS.json && test -f movetest/r3mg/scan.90002.1/published.ok
+    - EOSPATH=$PWD/fake_eos_move genModels.py --backend local --num_jobs 2 --runid 90002 --base_seed 123 --scan_dir movetest --config_file ../source/Run3ModelGen/data/configs/example_fixed_config.yaml --publish 2>&1 | tee resume.log
+    - grep -q "Nothing to be done" resume.log
+    - "! test -e movetest/scan.90002.1"
+    # extraction still works with the local copies gone — that is the point
+    - EOSPATH=$PWD/fake_eos_move_sel extractModels.py --backend local --eos_dir $PWD/fake_eos_move/90002 --selection "akarr['SS_m_h']!=-1"
+    - test -f fake_eos_move_sel/SelectedModels/90002/Models/SPheno/1/100000.slha
+
+# Cheap contract checks, no physics tools: the unit suite (tests/, including the
+# sampled-point golden file that guards the RNG contract the per-step reference
+# counts rest on — a changed np.random call order shows up here instead of as a
+# mysterious reference mismatch) and a DAG dry-run of every workflow mode. The
+# steps live in run_checks.sh, not here, so `pixi run test` runs the same thing.
+workflow_dryrun_local:
+  # .setup_local, NOT .genmodels_local: nothing here touches EOS, so the fastest
+  # and most fundamental job must not depend on the kinit (and its masked
+  # credentials) that the reference-comparing scans need.
+  extends: .setup_local
+  stage: genModels
+  needs: [build_local]
+  script:
+    # Same script as `pixi run test` — one definition, so local and CI cannot drift.
+    - bash tests/run_checks.sh
 
 # ---------------------------------------------------------------------------
 # extractModels stage — runs on the flat scan output
@@ -316,16 +346,13 @@ publish_docker:
   needs:
     - job: build_docker
       artifacts: true
-    # Docker tests
+    # Docker tests: flat + mcmc only — they validate the image (baked pythia8 /
+    # SModelS caches, entrypoint) that gets published here. All five priors are
+    # regression-tested against the references in the local track, which resolves
+    # from the same pixi.lock, so running every prior twice buys little.
     - job: genModels_flat_docker
       artifacts: false
-    - job: genModels_fixed_docker
-      artifacts: false
     - job: genModels_mcmc_docker
-      artifacts: false
-    - job: genModels_grid_docker
-      artifacts: false
-    - job: genModels_importance_docker
       artifacts: false
     - job: extractModels_docker
       artifacts: false

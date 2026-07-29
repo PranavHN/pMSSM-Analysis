@@ -156,7 +156,7 @@ grid:
 
 Key differences from other priors:
 - The `num_models` value is **overridden** by the total grid size.
-- The 10,000-model-per-job cap applies: if the grid product exceeds 10,000, split into multiple jobs.
+- The 10,000-model-per-job cap applies: if the grid product exceeds 10,000, split into multiple jobs (`genModels.py --num_jobs N`).
 - Like `flat` and `fixed`, the pipeline runs after all models are sampled (unlike `mcmc`, which runs the pipeline during sampling).
 
 ### Importance
