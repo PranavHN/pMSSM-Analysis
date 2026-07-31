@@ -33,26 +33,40 @@ groups:
 group-components:
   - batch=1
 
-# NB: a group job's time limit is the SUM of its rules' runtimes — keep the
-# per-rule values small enough that sample + 8 steps + ntuple fits the
-# partition limit (general: 24h). No cpus_per_task default: the slurm plugin
-# derives it from threads, so the group requests max(threads) = 4 CPUs.
+# NB: a group job's time limit is the SUM of its rules' runtimes. Deliberately NO
+# `runtime` override for sample/step/ntuple here: those rules now compute their own
+# from the measured per-model cost of each tool (see _rule_runtime in
+# workflow/rules/generate.smk), which puts ~83% of the group's allowance on SModelS
+# instead of giving all eight steps the slow tool's budget. A flat 120 min/step summed
+# to 16h for ~1.5h of work and capped a batch at ~2100 models; the scaled budget fits
+# a full 10k-model batch (the per-directory cap) in ~17h of the 24h partition limit.
+# A `set-resources` entry for those rules would silently override the scaling.
 default-resources:
   slurm_partition: "'general'"
-  runtime: 60           # minutes per rule
+  runtime: 60           # minutes; applies only to rules with no runtime of their own
   mem_mb: 4000
 
 set-resources:
   step:
-    runtime: 120        # per tool over a whole batch; group total = 18h
     # SModelS alone peaks at ~1.6 GB just loading the results database (measured),
-    # before pythia8 and the python interpreter on top; 4 GB leaves no headroom
-    # for a full-size batch. The group requests max(mem_mb) over its rules.
-    mem_mb: 8000
+    # before pythia8 and the python interpreter on top. With threads: 1 (below) up to
+    # 4 steps run CONCURRENTLY inside one batch job, each with its own interpreter and
+    # its own copy of whatever it loads, so the old 8 GB is no longer enough. The group
+    # requests max(mem_mb) over its rules.
+    mem_mb: 16000
+    # The slurm plugin derives cpus_per_task from threads; with threads: 1 that would
+    # shrink the batch job to a single CPU and re-serialise the steps. Ask explicitly.
+    cpus_per_task: 4
   chain:
     runtime: 1380       # a full MH chain is one long sequential job (23h)
     mem_mb: 8000
 
 set-threads:
-  step: 4               # group max -> 4 CPUs per batch job (legacy RequestCpus=4)
+  step: 1               # each step is a SINGLE-threaded loop over models, so claiming
+                        # 4 (the legacy RequestCpus=4) meant one step monopolised the
+                        # job's whole allocation and they ran strictly one at a time.
+                        # Claiming 1 against cpus_per_task: 4 lets four run at once —
+                        # micromegas/superiso/gm2calc/feynhiggs/SModelS all gate on
+                        # SPheno, so the cheap four hide inside SModelS' runtime
+                        # (~11h serial -> ~9.5h, SModelS-bound).
   chain: 4

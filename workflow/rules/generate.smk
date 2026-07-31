@@ -1,3 +1,5 @@
+import math
+
 # Point-sampled priors (flat/fixed/grid/importance): sample once per batch, then one
 # rule instance per (tool, batch), gated through the per-step manifests. Per-model
 # files inside the scan dir are NOT declared outputs (they legitimately don't exist
@@ -12,6 +14,73 @@
 # gate on SPheno and are independent of one another (which also lets the DAG run them
 # concurrently). NB this changes `attempted` per step, so the CI per-step reference
 # counts must be regenerated.
+# ── per-rule time budget ────────────────────────────────────────────────────────
+# A group job's time limit is the SUM of its rules' runtimes, so one flat `runtime`
+# for every step spends eight times the slow tool's budget: seven of the eight steps
+# finish in minutes while each claims SModelS' whole allowance. With runtime=120 that
+# summed to 16h for ~1.5h of work and capped a batch at ~2100 models -- below the 10k
+# per-directory cap, so time was the binding constraint rather than the cap.
+#
+# Budget per tool instead, scaled from each tool's measured per-model cost, so nearly
+# the whole allowance lands on SModelS (~87% of the real work). The scaling reads
+# num_models, so the request tracks the batch size automatically. At the 10k cap this
+# declares ~17h against the 24h partition limit, and a batch really takes ~11h.
+#
+# Seconds per ATTEMPTED model, measured on the 200-model reference batch in
+# run/smodels_random (SModelS with LO cross sections and combineSRs off). Tools
+# downstream of SPheno see only the ~58% of models yielding a usable spectrum; that
+# fraction is folded in, so every figure below is per attempted model.
+_SECONDS_PER_MODEL = {
+    "sample":     0.005,
+    "prep_input": 0.005,
+    "SPheno":     0.135,
+    "softsusy":   0.020,
+    "micromegas": 0.115,   # 0.198 measured x 0.58 usable
+    "superiso":   0.095,   # 0.164 x 0.58
+    "gm2calc":    0.010,   # 0.017 x 0.58
+    "feynhiggs":  0.145,   # 0.250 x 0.58
+    "SModelS":    3.420,   # 5.900 x 0.58
+    "ntuple":     0.040,
+}
+# Headroom on the mean. The per-model cost varies a lot point to point (SModelS time
+# scales with how many analyses match a spectrum), and the means above come from ~110
+# usable models, so the mean itself is uncertain. A wall-clock kill loses the batch's
+# whole ~11h of work, so buy 50% on every rule.
+_TIME_MARGIN = 1.50
+_RUNTIME_FLOOR = 10        # minutes; never request less
+
+# ...and give the slow tool everything the others leave under the partition cap.
+# Unrequested allowance is NOT available at runtime: the summed group request becomes
+# the job's --time and slurm kills at it, so time left unclaimed is forfeited rather
+# than held in reserve. SModelS is also the only rule that can realistically overrun
+# (the rest need 1-25 min), so raising ITS budget alone converts the remainder into
+# tolerance without inflating trivial rules and hurting backfill. At the 10k cap that
+# takes SModelS from 1.5x to ~2.2x its expected cost for free.
+_PARTITION_MINUTES = 24 * 60   # 'general' MaxTime=1-00:00:00
+_GROUP_RESERVE = 20            # keep the summed request clear of the cap
+_SLOW_STEP = "SModelS"
+_SLOW_MARGIN_MAX = 2.50        # ceiling, so a small batch does not ask for 21h
+
+
+def _scaled(name, n):
+    per = _SECONDS_PER_MODEL[name]
+    return max(_RUNTIME_FLOOR, math.ceil(_TIME_MARGIN * per * n / 60))
+
+
+def _rule_runtime(name):
+    '''Minutes to request for one rule over this config's num_models.'''
+    if name not in _SECONDS_PER_MODEL:
+        return 120         # unknown tool: keep the historical flat budget
+    n = max(1, int(CFG.get("num_models") or 1))
+    base = _scaled(name, n)
+    if name != _SLOW_STEP:
+        return base
+    others = sum(_scaled(k, n) for k in _SECONDS_PER_MODEL if k != _SLOW_STEP)
+    remainder = _PARTITION_MINUTES - _GROUP_RESERVE - others
+    capped = math.ceil(_SLOW_MARGIN_MAX * _SECONDS_PER_MODEL[name] * n / 60)
+    return max(base, min(remainder, capped))
+
+
 _PRODUCER_OF = {s["output_dir"]: s["name"] for s in STEPS if s.get("output_dir")}
 _STEP_BY_NAME = {s["name"]: s for s in STEPS}
 
@@ -40,6 +109,8 @@ rule sample:
         sdir = lambda w: SCANS[w.scan]["dir"],
         seed = lambda w: SCANS[w.scan]["seed"],
         cfg = CFG_OPT
+    resources:
+        runtime = _rule_runtime("sample")
     shell:
         "{RULE_SCRIPTS}/r3mg_batch.py sample {params.cfg} --scan_dir {params.sdir} "
         "--seed {params.seed} --points_out {output.points}"
@@ -57,6 +128,10 @@ rule step:
         cfg = CFG_OPT,
         prev = lambda w, input: f"--prev_manifest {input.prev}" if getattr(input, "prev", "") else ""
     resources:
+        # Per-TOOL time budget (see _rule_runtime): SModelS gets ~83% of the group's
+        # allowance because it is ~87% of the work. A flat per-step runtime made the
+        # group's summed limit 8x the slow tool's need.
+        runtime = lambda w: _rule_runtime(w.step),
         # SModelS loads the whole results database (~1.4 GB pickle) into memory for
         # every model. Two batches doing that at once exceeded the CI container's
         # memory cap and the kernel killed one of them — a bare non-zero exit with
@@ -92,6 +167,8 @@ if MODE == "single":
         params:
             sdir = SCANS[_sname]["dir"],
             cfg = CFG_OPT
+        resources:
+            runtime = _rule_runtime("ntuple")
         shell:
             "{RULE_SCRIPTS}/r3mg_batch.py ntuple {params.cfg} --scan_dir {params.sdir} --points {input.points}"
 
@@ -108,5 +185,7 @@ else:
         params:
             sdir = lambda w: f"{BATCH_PREFIX}.{w.b}",
             cfg = CFG_OPT
+        resources:
+            runtime = _rule_runtime("ntuple")
         shell:
             "{RULE_SCRIPTS}/r3mg_batch.py ntuple {params.cfg} --scan_dir {params.sdir} --points {input.points}"
