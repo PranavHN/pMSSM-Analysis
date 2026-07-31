@@ -1,17 +1,32 @@
-# Point-sampled priors (flat/fixed/grid/importance): sample once per batch,
-# then one rule instance per (tool, batch), linearly chained in config-step
-# order through the per-step manifests — reproducing the legacy list-order
-# failure gating exactly (see modelgen.generate_models), so per-step success
-# counts match the CI references. Per-model files inside the scan dir are NOT
-# declared outputs (they legitimately don't exist for failed models); the
-# manifests in META are the declared, atomic rule products.
+# Point-sampled priors (flat/fixed/grid/importance): sample once per batch, then one
+# rule instance per (tool, batch), gated through the per-step manifests. Per-model
+# files inside the scan dir are NOT declared outputs (they legitimately don't exist
+# for failed models); the manifests in META are the declared, atomic rule products.
+#
+# Gating follows the DATA DEPENDENCY — each step waits on the step that produces its
+# `input_dir` — not the position in the config list. Previously it was a linear chain
+# in config order, which meant micromegas, superiso, gm2calc, feynhiggs and SModelS
+# were serialised behind each other even though all five read the SAME SPheno output:
+# a model that micromegas could say nothing about was then never attempted by
+# superiso/gm2calc/feynhiggs either, for no reason beyond list order. Now they all
+# gate on SPheno and are independent of one another (which also lets the DAG run them
+# concurrently). NB this changes `attempted` per step, so the CI per-step reference
+# counts must be regenerated.
+_PRODUCER_OF = {s["output_dir"]: s["name"] for s in STEPS if s.get("output_dir")}
+_STEP_BY_NAME = {s["name"]: s for s in STEPS}
+
+
+def _gate_of(step_name):
+    '''Name of the step whose output `step_name` consumes (None if it has no input).'''
+    indir = _STEP_BY_NAME[step_name].get("input_dir")
+    return _PRODUCER_OF.get(indir) if indir else None
 
 
 def _step_inputs(wildcards):
-    i = STEP_NAMES.index(wildcards.step)
     ins = {"points": f"{META}/{wildcards.scan}/points.npz"}
-    if i > 0:
-        ins["prev"] = f"{META}/{wildcards.scan}/step_{STEP_NAMES[i-1]}.json"
+    gate = _gate_of(wildcards.step)
+    if gate:
+        ins["prev"] = f"{META}/{wildcards.scan}/step_{gate}.json"
     if wildcards.step == "SModelS":
         # in-process smodels needs the built pythia8 + prefetched database
         ins["warm"] = [f"{WARM}/pythia8.ok", f"{WARM}/smodels_db.ok"]

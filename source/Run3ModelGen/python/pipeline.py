@@ -221,18 +221,29 @@ def scheduler_identity() -> dict:
 # ── Per-step manifests (declared Snakemake outputs; failure-is-data) ───────
 
 def write_manifest(path: str, step: str, num_models: int,
-                   attempted: list, succeeded: list, chain_ok: list) -> None:
+                   attempted: list, succeeded: list, chain_ok: list,
+                   with_ntuple_vars: list = None) -> None:
     '''Write a per-step manifest: which models were attempted/succeeded, and
-    which are still alive for the next step under the legacy list-order gating
-    (a model is dropped from the chain on its first failing step).'''
+    which are still alive for the step that consumes this one's output (a model is
+    dropped from a branch of the pipeline on the failure of the step it depends on).
+
+    :param with_ntuple_vars: the subset of `succeeded` whose output actually yields
+        variables the ntuple can carry — the honest success statistic, since a clean
+        exit is not evidence of usable output. Defaults to `succeeded` for callers
+        that do not distinguish the two.
+    '''
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if with_ntuple_vars is None:
+        with_ntuple_vars = succeeded
     manifest = {
         "step": step,
         "num_models": num_models,
         "attempted": sorted(attempted),
         "succeeded": sorted(succeeded),
         "chain_ok": sorted(chain_ok),
-        "counts": [len(succeeded), num_models],
+        "with_ntuple_vars": sorted(with_ntuple_vars),
+        "counts": [len(with_ntuple_vars), num_models],
+        "counts_tool_ran": [len(succeeded), num_models],
         # which batch job produced this step (record only — see scheduler_identity)
         "scheduler": scheduler_identity(),
     }

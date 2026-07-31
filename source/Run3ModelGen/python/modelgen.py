@@ -562,14 +562,35 @@ class ModelGenerator:
     # ── End of importance sampling ────────────────────────────────────
 
     def run_step(self, modelnum: int, **kwargs) -> bool:
-        '''Function decorator for exectuting run_* function. Returns success bool.'''
+        '''Function decorator for exectuting run_* function. Returns success bool.
+
+        This is the GATE: it reports whether the tool ran, and drives which models the
+        next step attempts. It deliberately does NOT fold in whether the output is
+        ntuple-usable — see :meth:`step_produced_ntuple_vars` for that, which is
+        reported separately so a stricter statistic cannot silently shrink the
+        dataset.
+        '''
         step_name = kwargs['name']
-        
+
         # Select run_ function based on step name
         if hasattr(self, f"run_{step_name}") and callable(func := getattr(self, f"run_{step_name}")):
             return func(modelnum, **kwargs)
         else:
             raise KeyError(f"step {step_name} not supported!")
+
+    def step_produced_ntuple_vars(self, modelnum: int, step: dict) -> bool:
+        '''Did `step` leave variables the ntuple can carry for `modelnum`?
+
+        The honest per-step success statistic. A tool's exit status is not evidence of
+        usable output: SPheno's "charged LSP" SPINFO warning makes pyslha raise on an
+        otherwise fine spectrum, and SModelS writes a result file with no ExptRes at
+        all when it was given no cross sections — a 200-model scan reported
+        "SModelS 116/116 succeeded" while its ntuple got zero SModelS branches. This
+        counts the models that actually contribute, using the same extraction the
+        ntuple performs.
+        '''
+        return ntupling.step_produced_ntuple_vars(step, modelnum, self.scan_dir,
+                                                  getattr(self, 'isGMSB', False))
     
     def run_prep_input(self, modelnum: int, **kwargs) -> bool:
         '''Prep input. Returns the filename of the prepped file.'''
@@ -682,31 +703,52 @@ class ModelGenerator:
         else:
             raise ValueError(f"ERROR: prior {self.prior} not supported. Can be: flat, fixed, mcmc, grid, importance.")
 
-        # prep dict to keep track of successes:
+        # prep dicts to keep track of successes. `succcounts` is the gate (the tool
+        # ran); `usablecounts` is the honest statistic (the output yields ntuple
+        # variables). They differ exactly where a tool exits cleanly having produced
+        # nothing the ntuple can carry, which is what the stats line must not hide.
         succcounts = {}
+        usablecounts = {}
         for step in self.steps:
             succcounts[step['name']] = 0
+            usablecounts[step['name']] = 0
+
+        # Gate on the step that PRODUCES this step's input_dir (mirrors
+        # workflow/rules/generate.smk), not on the previous entry in the config list:
+        # micromegas, superiso, gm2calc, feynhiggs and SModelS all read the SAME
+        # SPheno output, so one of them saying nothing must not stop the others from
+        # being attempted.
+        producer_of = {s['output_dir']: s['name'] for s in self.steps if s.get('output_dir')}
 
         for mod in range(self.num_models):
             log.info(f"Generating Model: {mod}.slha ({mod+1}/{self.num_models})")
 
-            model_ok = True
+            ran_ok = set()
             for step in self.steps:
-                if not model_ok:
-                    log.info(f"\tskipping step: {step['name']} (previous step failed)")
+                indir = step.get('input_dir')
+                gate = producer_of.get(indir) if indir else None
+                if gate is not None and gate not in ran_ok:
+                    log.info(f"\tskipping step: {step['name']} (its input step {gate} failed)")
                     continue
                 log.info(f"\trunning step: {step['name']}")
                 success = self.run_step(modelnum=mod, **step)
 
                 # Keep track of successes
-                if success: succcounts[step['name']] += 1
-                else: model_ok = False
+                if success:
+                    ran_ok.add(step['name'])
+                    succcounts[step['name']] += 1
+                    if self.step_produced_ntuple_vars(mod, step):
+                        usablecounts[step['name']] += 1
 
         self._dump_scan_config()
 
-        log.info("Finished generating models! Stats for successful generations (successful/attempted):")
+        log.info("Finished generating models! Stats per step "
+                 "(with ntuple variables / tool ran / attempted):")
         for step in succcounts:
-            log.info(f"\t{step}: {succcounts[step]}/{self.num_models}.")
+            usable, ran = usablecounts[step], succcounts[step]
+            note = "" if usable == ran else \
+                f"   <- {ran - usable} ran but produced NO ntuple variables"
+            log.info(f"\t{step}: {usable}/{ran}/{self.num_models}.{note}")
 
         return None
 

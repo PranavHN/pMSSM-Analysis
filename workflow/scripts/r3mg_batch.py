@@ -176,7 +176,7 @@ def step(step_name, config_file, scan_dir, points_file, prev_manifest, manifest_
     workdir = tempfile.mkdtemp(prefix=f"r3mg_{step_name}_")
     os.chdir(workdir)
 
-    succeeded = []
+    succeeded, usable = [], []
     for mod in gate:
         log.info(f"\trunning step: {step_name} (model {mod})")
         if step_name == 'SModelS':
@@ -191,10 +191,23 @@ def step(step_name, config_file, scan_dir, points_file, prev_manifest, manifest_
             ok = mg.run_step(modelnum=mod, **step_cfg)
         if ok:
             succeeded.append(mod)
+            # The reported success rate is "produced variables the ntuple can carry",
+            # which is not the same as "the tool exited 0": SModelS writes a result
+            # file with no ExptRes when it had no cross sections, and SPheno's
+            # charged-LSP SPINFO warning makes the spectrum unreadable. Counted with
+            # the ntuple's own extraction so the number cannot drift from reality.
+            if mg.step_produced_ntuple_vars(mod, step_cfg):
+                usable.append(mod)
 
+    # `chain_ok` stays the tool-ran set: it is what the next step gates on, and a
+    # stricter statistic must not silently shrink the dataset.
     pipeline.write_manifest(manifest_out, step=step_name, num_models=mg.num_models,
-                            attempted=gate, succeeded=succeeded, chain_ok=succeeded)
-    log.info(f"{step_name}: {len(succeeded)}/{mg.num_models} (attempted {len(gate)})")
+                            attempted=gate, succeeded=succeeded, chain_ok=succeeded,
+                            with_ntuple_vars=usable)
+    lost = len(succeeded) - len(usable)
+    note = f"  [{lost} ran but produced NO ntuple variables]" if lost else ""
+    log.info(f"{step_name}: {len(usable)}/{len(succeeded)}/{mg.num_models} "
+             f"(with ntuple vars / tool ran / total; attempted {len(gate)}){note}")
 
 
 @cli.command()

@@ -853,12 +853,126 @@ def readModel(inputDefinitions: list[tuple], num: int, scanDir: str, outName: st
                     data[f"{prefix}bestExpUL_TheoryPrediction"] = best_res['theory prediction (fb)']
                     data[f"{prefix}bestExpUL_UpperLimit"]        = best_res['upper limit (fb)']
                     data[f"{prefix}bestExpUL_ExpUpperLimit"]     = best_res['expected upper limit (fb)']
+                    # The exclusion verdict for that most-sensitive analysis: r > 1 is
+                    # excluded. Taken from SModelS' own 'r'/'r_expected' rather than
+                    # dividing the two branches above, so it matches what SModelS
+                    # reports (and stays right for result types where r is not simply
+                    # prediction/limit). Absent -> fall back to the ratio.
+                    r_obs = best_res.get('r')
+                    if r_obs is None and best_res['upper limit (fb)']:
+                        r_obs = best_res['theory prediction (fb)'] / best_res['upper limit (fb)']
+                    if r_obs is not None:
+                        data[f"{prefix}bestExpUL_r"] = r_obs
+                    r_exp = best_res.get('r_expected')
+                    if r_exp is None and best_res['expected upper limit (fb)']:
+                        r_exp = best_res['theory prediction (fb)'] / best_res['expected upper limit (fb)']
+                    if r_exp is not None:
+                        data[f"{prefix}bestExpUL_r_expected"] = r_exp
+
+                # The exclusion verdict. bestExpUL_* above selects by SMALLEST expected
+                # upper limit, which finds the analysis with the strongest absolute
+                # limit while ignoring how much signal is predicted in ITS topology --
+                # so its r can sit orders of magnitude below the r that actually
+                # excludes the point (measured: a point with bestExpUL_r = 0.004 whose
+                # true max r was 2.11, i.e. excluded). Two honest numbers instead:
+                #
+                #   r_max      largest OBSERVED r over all analyses. r_max > 1 => the
+                #              point is excluded by at least one analysis. Use this for
+                #              an exclusion cut.
+                #   bestExpR_* the analysis with the largest EXPECTED r, which is
+                #              SModelS' notion of "most sensitive" (it accounts for the
+                #              predicted signal, not just the limit). Selecting on
+                #              expectation avoids the bias of picking whichever analysis
+                #              happened to fluctuate low in data; on real output it
+                #              recovered the true max r for 7 of 9 models.
+                rs = [r['r'] for r in expt_results if r.get('r') is not None]
+                if rs:
+                    data[f"{prefix}r_max"] = max(rs)
+                exp_cand = [r for r in expt_results if r.get('r_expected') is not None]
+                if exp_cand:
+                    best_exp = max(exp_cand, key=lambda r: r['r_expected'])
+                    data[f"{prefix}bestExpR_r_expected"] = best_exp['r_expected']
+                    if best_exp.get('r') is not None:
+                        data[f"{prefix}bestExpR_r"] = best_exp['r']
             except: pass
             
         else:
             log.fatal(f"filetype {filetype} not recognised!")
         
     return data
+
+# How each pipeline step maps onto the ntuple, in the substring-match order the
+# ntuple has always used. Each entry is
+#     (name substring, filetype, blocks, decays, needsMass, required variable)
+# where the first five build the readModel inputDefinition and the last names the
+# one variable whose presence means "this step really produced ntuple content".
+# `None` means "any variable at all" — used for the steps whose branch names are
+# data-dependent (SModelS analysis IDs, evade columns).
+#
+# The required variable is prefix-RELATIVE: the branch is f"{step['prefix']}_{var}".
+# Keep in sync with refcheck.STEP_BRANCH, which spells the same thing out with the
+# default prefixes for the CI reference counts.
+_STEP_NTUPLE_SPECS = [
+    ("input",      ".slha",    lambda: input_blocks,     lambda: {},               False, "M_1"),
+    ("softsusy",   ".slha",    lambda: softsusy_blocks,  lambda: softsusy_decays,  True,  "m_h"),
+    ("SPheno",     ".slha",    lambda: spheno_blocks,    lambda: softsusy_decays,  True,  "m_h"),
+    ("micromegas", ".csv",     None,                     None,                     None,  "Omega"),
+    ("superiso",   ".flha",    lambda: superiso_blocks,  lambda: {},               False, "BR_b_to_sgamma"),
+    ("gm2calc",    ".slha",    lambda: gm2calc_blocks,   lambda: {},               False, "gmuon"),
+    ("feynhiggs",  ".slha",    lambda: feynhiggs_blocks, lambda: {},               False, "m_h"),
+    ("evade",      ".tsv",     None,                     None,                     None,  None),
+    ("SModelS",    ".slha.py", None,                     None,                     None,  None),
+]
+
+
+def step_ntuple_spec(step: dict) -> tuple:
+    '''Return ``(inputDefinition, required_variable)`` for one pipeline step.
+
+    Single source of truth shared by :func:`mkntuple` (which needs the
+    inputDefinition) and :func:`step_produced_ntuple_vars` (which needs both), so
+    the "did this step produce ntuple content" test can never drift from what the
+    ntuple actually reads.
+    '''
+    for substr, filetype, blocks, decays, needs_mass, required in _STEP_NTUPLE_SPECS:
+        if substr in step['name']:
+            inputdef = (f"{step['output_dir']}/", filetype, f"{step['prefix']}",
+                        blocks() if blocks else None,
+                        decays() if decays else None, needs_mass)
+            return inputdef, required
+    raise KeyError(f"Step name {step['name']} not recognised!")
+
+
+def step_produced_ntuple_vars(step: dict, modelnum: int, scan_dir: str,
+                              isGMSB: bool = False) -> bool:
+    '''Did this step produce, for this model, variables the ntuple can carry?
+
+    Reads the step's output with the SAME extraction :func:`mkntuple` uses, so a
+    True here guarantees the model contributes real values rather than the ntuple's
+    -1 "not filled" sentinel.
+
+    This exists because a tool's own exit status is not evidence of usable output.
+    Two cases from production: SPheno emits a "charged LSP" SPINFO warning that
+    makes pyslha raise, which a bare ``except`` turned into an indistinguishable
+    "failure" while the perfectly good spectrum file was used downstream anyway;
+    and SModelS wrote a result file with no ExptRes at all (no cross sections),
+    reporting 116/116 "succeeded" for a scan whose ntuple got zero SModelS
+    branches. Both are caught here.
+
+    Unknown steps return True: a step this module cannot map is not evidence of
+    failure, and :func:`mkntuple` raises on it anyway.
+    '''
+    try:
+        inputdef, required = step_ntuple_spec(step)
+    except KeyError:
+        return True
+
+    # readModel always sets 'model', so emptiness alone is not a usable test.
+    data = readModel([inputdef], modelnum, scan_dir, "x.0.0.root", isGMSB)
+    data.pop('model', None)
+    if required is None:
+        return bool(data)
+    return f"{step['prefix']}_{required}" in data
+
 
 def mkntuple(steps: dict, scan_dir: str, num_models: int, isGMSB: bool) -> None:
     '''Function for generating ntuple for directory scan_dir with num_models using uproot.'''
@@ -879,30 +993,8 @@ def mkntuple(steps: dict, scan_dir: str, num_models: int, isGMSB: bool) -> None:
     file = uproot.recreate(outName)
     
     # Build inputDefinitions from steps dict
-    inputDefinitions = []
-    for step in steps:
-        if "input" in step['name']:
-            inputDefinitions += [ (f"{step['output_dir']}/", ".slha", f"{step['prefix']}", input_blocks, {}, False), ]
-        elif "softsusy" in step['name']:
-            inputDefinitions += [ (f"{step['output_dir']}/", ".slha", f"{step['prefix']}", softsusy_blocks, softsusy_decays,True),]
-        elif "SPheno" in step['name']:
-            inputDefinitions += [ (f"{step['output_dir']}/", ".slha", f"{step['prefix']}", spheno_blocks, softsusy_decays, True), ]
-        elif "micromegas" in step['name']:
-            inputDefinitions += [ (f"{step['output_dir']}/", ".csv", f"{step['prefix']}", None, None, None), ]
-        elif "superiso" in step['name']:
-            inputDefinitions += [ (f"{step['output_dir']}/", ".flha", f"{step['prefix']}", superiso_blocks, {}, False), ]
-        elif "gm2calc" in step['name']:
-            inputDefinitions += [ (f"{step['output_dir']}/", ".slha", f"{step['prefix']}", gm2calc_blocks, {}, False), ]
-        elif "feynhiggs" in step['name']:
-            inputDefinitions += [ (f"{step['output_dir']}/", ".slha", f"{step['prefix']}", feynhiggs_blocks, {}, False), ]
-        elif "evade" in step['name']:
-            inputDefinitions += [ (f"{step['output_dir']}/", ".tsv", f"{step['prefix']}", None, None, None) ]
-        elif "SModelS" in step['name']:
-            # log.warning("SModelS not supported in NTupling yet!")
-            inputDefinitions += [ (f"{step['output_dir']}/", ".slha.py", f"{step['prefix']}", None, None, None) ]
-        else:
-            raise KeyError(f"Step name {step['name']} not recognised!")
-    
+    inputDefinitions = [step_ntuple_spec(step)[0] for step in steps]
+
     treedict = {}
     # Loop over models and keys and treedict accordingly
     for modid in range(num_models):

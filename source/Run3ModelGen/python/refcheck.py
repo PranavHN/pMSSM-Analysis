@@ -13,7 +13,6 @@ no side effects (``uproot`` is imported lazily inside :func:`per_step_counts`).
 '''
 
 import os
-import glob
 
 # Shared EOS location (xrootd URL) for the reference files.
 EOS_BASE = "root://eosuser.cern.ch//eos/user/n/nicebot/Run3ModelGen"
@@ -36,9 +35,17 @@ SCANS = [
 
 # Representative ntuple branch per pipeline step. A model "passed" the step if the
 # branch value != -1 (the ntuple's sentinel for "not filled"). This is the same
-# idiom used by extractModels (default selection ``SS_m_h != -1``). SModelS is
-# handled separately (see below): its ntuple branches are only filled when there
-# is a non-empty result, so counting them would undercount successes.
+# idiom used by extractModels (default selection ``SS_m_h != -1``), and the same
+# criterion the pipeline itself now reports as its per-step success rate (see
+# ntupling.step_produced_ntuple_vars / _STEP_NTUPLE_SPECS — keep the two in sync;
+# this table just spells out the default prefixes).
+#
+# SModelS is in here now. It used to be counted from its per-model output FILES,
+# on the reasoning that its branches "are only filled when there is a non-empty
+# result, so counting them would undercount successes" — but a result file with no
+# ExptRes contributes nothing to the ntuple, so counting those as successes is what
+# let a scan report SModelS 116/116 while producing zero SModelS branches.
+# bestExpUL_r is the stable branch (analysis-ID branches are data-dependent).
 STEP_BRANCH = {
     "prep_input": "IN_M_1",
     "SPheno":     "SP_m_h",
@@ -47,10 +54,11 @@ STEP_BRANCH = {
     "superiso":   "SI_BR_b_to_sgamma",
     "gm2calc":    "GM2_gmuon",
     "feynhiggs":  "FH_m_h",
+    "SModelS":    "SModelS_bestExpUL_r",
 }
 
-# Canonical display/compare order (SModelS, counted from files, last).
-STEP_ORDER = list(STEP_BRANCH.keys()) + ["SModelS"]
+# Canonical display/compare order.
+STEP_ORDER = list(STEP_BRANCH.keys())
 
 
 def by_name(name):
@@ -82,8 +90,9 @@ def per_step_counts(scan_dir):
     :param scan_dir: path to a ``scan_<name>`` directory (containing
         ``ntuple.0.0.root`` and the per-step output subdirs).
     :returns: ``{step: (passed, total)}``. Steps whose representative branch is
-        absent from the ntuple (reduced scans) are omitted. SModelS is included
-        only if a ``SModelS/`` subdir exists, counted from its output files.
+        absent from the ntuple (reduced scans) are omitted — including SModelS,
+        which is now counted from its branch like every other step rather than from
+        its output files (see :data:`STEP_BRANCH`).
     '''
     import uproot  # lazy: keeps importing this module cheap/side-effect free
 
@@ -95,13 +104,6 @@ def per_step_counts(scan_dir):
         arrs = tree.arrays(list(present.values()), library="np") if present else {}
         for step, branch in present.items():
             counts[step] = (int((arrs[branch] != -1).sum()), total)
-
-    # SModelS: count per-model output files (written only on success), not an
-    # ntuple branch (those are only filled when the result is non-empty).
-    smodels_dir = os.path.join(scan_dir, "SModelS")
-    if os.path.isdir(smodels_dir):
-        passed = len(glob.glob(os.path.join(smodels_dir, "*.slha.py")))
-        counts["SModelS"] = (passed, total)
 
     return counts
 
