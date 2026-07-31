@@ -80,7 +80,12 @@ if MODE == "single":
 
     rule ntuple:
         input:
-            last = f"{META}/{_sname}/step_{LAST_STEP}.json",
+            # EVERY step's manifest, not just the last one. Gating is a tree now (each
+            # step waits on the step producing its input_dir), so depending on the last
+            # step no longer transitively pulls in the others — softsusy, micromegas,
+            # superiso and gm2calc feed nothing downstream and would drop out of the DAG
+            # entirely, silently producing an ntuple missing their branches.
+            steps = expand(f"{META}/{_sname}/step_{{step}}.json", step=STEP_NAMES),
             points = f"{META}/{_sname}/points.npz"
         output:
             f"{SCANS[_sname]['dir']}/{_ntuple_basename(_sname)}"
@@ -94,7 +99,9 @@ else:
 
     rule ntuple:
         input:
-            last = f"{META}/scan.{RUNID}.{{b}}/step_{LAST_STEP}.json",
+            # every step's manifest — see the single-mode rule above
+            steps = expand(f"{META}/scan.{RUNID}.{{{{b}}}}/step_{{step}}.json",
+                           step=STEP_NAMES),
             points = f"{META}/scan.{RUNID}.{{b}}/points.npz"
         output:
             f"{BATCH_PREFIX}.{{b}}/ntuple.{RUNID}.{{b}}.root"

@@ -8,6 +8,7 @@ datadir = os.environ['DATAPATH'].split(':')[0]
 
 import pyslha
 
+from Run3ModelGen import ntupling
 from Run3ModelGen.ntupling import mkntuple
 from Run3ModelGen import pipeline
 from Run3ModelGen import sampling

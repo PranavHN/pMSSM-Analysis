@@ -117,6 +117,31 @@ def test_unknown_step_is_not_reported_as_failure(tmp_path):
     assert ntupling.step_produced_ntuple_vars(step, 0, str(tmp_path)) is True
 
 
+def test_modelgenerator_wrapper_is_callable(tmp_path):
+    '''Exercise the ModelGenerator method, not just the ntupling function.
+
+    Regression: modelgen imported only `mkntuple` from ntupling, so the wrapper
+    raised NameError on the module reference — every step of a real scan died at the
+    first model while the direct-call tests all passed.
+    '''
+    from Run3ModelGen.modelgen import ModelGenerator
+
+    mg = ModelGenerator.__new__(ModelGenerator)     # no config/pipeline needed
+    mg.scan_dir = str(tmp_path)
+    mg.isGMSB = False
+    (tmp_path / "SModelS").mkdir()
+    assert mg.step_produced_ntuple_vars(0, SMODELS_STEP) is False   # no output file
+
+    scan = _write_smodels(tmp_path, """
+        smodelsOutput = {
+        'OutputStatus' : {'file status' : 1},
+        'ExptRes' : [{'AnalysisID': 'A', 'theory prediction (fb)': 1.0,
+                      'upper limit (fb)': 10.0, 'expected upper limit (fb)': 20.0,
+                      'r': 0.1, 'r_expected': 0.05}]}
+        """)
+    assert mg.step_produced_ntuple_vars(0, SMODELS_STEP) is True
+
+
 # ── r-value branches ────────────────────────────────────────────────────────────
 
 # Three analyses. The most sensitive by SMALLEST expected UL is 'tiny' (its limit is
@@ -181,3 +206,26 @@ def test_no_exptres_yields_no_r_branches(tmp_path):
         """)
     d = _read(scan)
     assert not [k for k in d if "_r" in k]
+
+
+# ── DAG completeness under the new (tree-shaped) gating ─────────────────────────
+
+def test_ntuple_rule_depends_on_every_step(repo):
+    '''Regression: gating is a tree, so the last step no longer reaches the others.
+
+    Steps used to be chained in config order, so the ntuple rule depending on
+    `LAST_STEP` transitively pulled in every step. Now each step waits only on the
+    step producing its `input_dir`, which leaves softsusy, micromegas, superiso and
+    gm2calc feeding nothing downstream — when the ntuple rule still asked only for
+    the last manifest they silently dropped out of the DAG and the ntuple was built
+    missing all four tools' branches (observed: 3 of 7 steps ran).
+    '''
+    smk = (repo / "workflow" / "rules" / "generate.smk").read_text()
+    ntuple_rules = smk.split("rule ntuple:")[1:]
+    assert len(ntuple_rules) == 2, "expected the single-mode and batch-mode variants"
+    for body in ntuple_rules:
+        head = body.split("output:")[0]
+        assert "step=STEP_NAMES" in head, \
+            "the ntuple rule must expand over STEP_NAMES, not depend on one step"
+        assert "LAST_STEP" not in head, \
+            "LAST_STEP no longer reaches every step: gating is a tree, not a chain"
