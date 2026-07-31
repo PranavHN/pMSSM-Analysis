@@ -330,16 +330,31 @@ def _smodels_session(smodels_ini: str):
     return session
 
 
-def run_SModelS(infile: str, output_dir: str, smodels_ini: str, xsec_dest: str = None) -> bool:
+def run_SModelS(infile: str, output_dir: str, smodels_ini: str, xsec_dest: str = None,
+                nevents: int = 10_000, include_nll: bool = True) -> bool:
     '''Run SModelS and return True if successful.
 
-    :param xsec_dest: where the computed NLL cross sections are written and
+    :param xsec_dest: where the computed cross sections are written and
         SModelS is evaluated. ``None`` (legacy) appends them to ``infile`` IN
         PLACE — today's behavior in the sequential per-model loop, where every
         other SPheno consumer has already read the file. The Snakemake path
         passes a copy path instead, keeping the SPheno output immutable; the
         EOS packaging step folds the augmented copy back over the SPheno/ path
         inside the tarball so published tarballs are unchanged.
+    :param nevents: Pythia MC events per order.
+    :param include_nll: also compute the NLL (NLLfast k-factor) cross sections for
+        strong production. Costs a second Pythia pass; set False when squarks and
+        the gluino are heavy enough that strong production is irrelevant anyway.
+
+    Cross sections are computed at **LO for every process, plus optionally NLL**.
+    LO is not optional: NLLfast covers ONLY gluino and squark production, so an
+    NLL-only computation returns nothing at all for a spectrum whose light states
+    are electroweakinos and sleptons. Measured on a pMSSM point with the gluino and
+    all squarks at ~4 TeV and charginos/sleptons at ~190 GeV, NLL yielded 0 cross
+    sections while LO yielded 12 (chi_2^0 chi_1^+ at 0.96 pb, chi_1^- chi_1^+ at
+    0.74 pb, slepton pairs at ~0.01 pb). With no cross sections SModelS reports
+    `file status: -4` / "No cross-sections found", produces no ExptRes, and the
+    ntuple gets no SModelS branches — silently, for every model in the scan.
     '''
 
     # Replace handlers of the library
@@ -360,24 +375,38 @@ def run_SModelS(infile: str, output_dir: str, smodels_ini: str, xsec_dest: str =
     from smodels.tools.xsecComputer import LO, NLL
     # logging.getLogger("smodels").setLevel(logging.CRITICAL) # TODO: Need to find a way to clean up SModelS printout
 
-    # Lets compute the NLL cross-sections for 13 TeV. The xsecComputer will first use Pythia to compute
-    # the LO cross-sections and then NLLfast to compute the k-factors.
-    # The output will contain only the processes contained in NLLfast (gluino and squark production)
-    # For the Pythia step we have to define the number of MC events (1k)
-    # (To see how to also include LO cross-sections for all processes check the LO HowTo)
-    computer = xsecComputer.XSecComputer ( maxOrder=NLL, nevents = 10_000, pythiaVersion=8 )
+    # LO over ALL production channels (electroweakinos, sleptons, strong, ...) at
+    # 13 TeV via Pythia8, then optionally the NLLfast k-factors on top for the strong
+    # channels it covers. Both are written: the SLHA XSECTION block carries its QCD
+    # order, and SModelS uses the highest order available per process.
+    computers = [("LO", xsecComputer.XSecComputer(maxOrder=LO, nevents=nevents, pythiaVersion=8))]
+    if include_nll:
+        computers.append(("NLL", xsecComputer.XSecComputer(maxOrder=NLL, nevents=nevents,
+                                                           pythiaVersion=8)))
 
-    # Try computing xsecsNLL, will fail for missing inputs
-    try:
-        xsecsNLL=computer.compute(sqrts = 13*TeV, slhafile=infile )
-    except:
-        success = False
-        return success
+    computed = []
+    for order, computer in computers:
+        try:
+            xsecs = computer.compute(sqrts=13 * TeV, slhafile=infile)
+        except Exception as exc:
+            # A failure at LO is fatal (no cross sections at all -> SModelS cannot
+            # decompose); a failure of the NLL add-on is not.
+            if order == "LO":
+                log.warning(f"SModelS xsec computation failed at LO for {infile}: {exc}")
+                return False
+            log.warning(f"SModelS NLL k-factors failed for {infile}, keeping LO only: {exc}")
+            continue
+        if len(xsecs):
+            computed.append((computer, xsecs))
 
-    # If all relevant xsecs are 0, computer.compute() will return an empty list. Set SModelS to fail in this case:
-    if xsecsNLL == []:
-        success = False
-        return success
+    # No cross sections at all -> SModelS would report `file status: -4` and produce no
+    # ExptRes. That is a failed model, so say so instead of writing an unusable file.
+    # NB the emptiness test must be len()/truthiness: compute() returns an
+    # XSectionList, and an EMPTY one compares `!= []`, so the old `== []` guard never
+    # fired and this function returned True for every such model.
+    if not computed:
+        log.warning(f"SModelS: no cross sections above sigmacut for {infile}; model failed")
+        return False
 
     # The file that receives the cross sections and is passed to SModelS: the
     # SPheno output itself (legacy), or an immutable-input-preserving copy.
@@ -388,7 +417,8 @@ def run_SModelS(infile: str, output_dir: str, smodels_ini: str, xsec_dest: str =
 
     # Finally, lets write the cross-sections back to the file
     # (will write only the cross-sections not overlapping the existing ones):
-    computer.addXSecToFile(xsecsNLL,xsec_dest)
+    for computer, xsecs in computed:
+        computer.addXSecToFile(xsecs, xsec_dest)
 
     # Parameters + database, loaded once per process (see _smodels_session)
     parser, database = _smodels_session(smodels_ini)
