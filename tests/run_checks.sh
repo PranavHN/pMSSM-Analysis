@@ -60,6 +60,30 @@ case "$(all_targets)" in
     *) echo "FAIL: keep_local must keep the ntuples as requested targets"; exit 1 ;;
 esac
 
+# genModels.py --backend htcondor defaults the batch data into a per-job directory
+# that HTCondor deletes when the job exits, so the two bookkeeping roots have to
+# come apart: the per-batch manifests travel WITH the data, the published markers
+# stay behind. Both halves are silent when wrong. Markers on scratch lose every
+# finished batch on resume; manifests on shared storage outlive the scan dir they
+# describe, so an evicted batch resumes straight into r3mg_batch.py's out-of-sync
+# guard and demands a manual rm -rf. env -u: the literal must survive unexpanded on
+# the submit host (an empty value would expand to "/scan" instead).
+echo "== workflow DAG: ephemeral scan dirs split the bookkeeping =="
+env -u _CONDOR_SCRATCH_DIR "${SMK[@]}" --config mode=batch runid=1 batches=2 \
+    publish=eos 'scan_parent=$_CONDOR_SCRATCH_DIR/scan' meta_parent=run > "$dry"
+if ! grep -q 'run/r3mg/scan\.1\.[01]/published\.ok' "$dry"; then
+    echo "FAIL: published markers must land under meta_parent, not with the data"; exit 1
+fi
+if ! grep -q '\$_CONDOR_SCRATCH_DIR/scan/r3mg/scan\.1\.[01]/points\.npz' "$dry"; then
+    echo "FAIL: per-batch manifests must travel with the scan data"; exit 1
+fi
+# meta_parent=run, so a manifest that wrongly followed META prints as
+# run/r3mg/<scan>/points.npz; the correct scratch one is .../scan/r3mg/... and
+# cannot match this.
+if grep -q 'run/r3mg/scan\.1\.[01]/points\.npz' "$dry"; then
+    echo "FAIL: a manifest left on shared storage outlives its scan dir"; exit 1
+fi
+
 echo "== workflow DAG: mcmc chain =="
 "${SMK[@]}" --config mode=single scan_dir=run/dryrun_mcmc config_file="$CFGD/ci_mcmc_config.yaml"
 

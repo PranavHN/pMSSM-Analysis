@@ -71,7 +71,10 @@ def flavour_resources(flavour: str) -> list:
         # (+JobFlavour = "espresso"), so embedding them here yields ""espresso"".
         f"classad_JobFlavour='{flavour}'",
         'classad_MaxRuntime=604800',
-        'htcondor_request_disk_mb=700',
+        # Must cover a whole batch: genModels.py defaults the batch data into
+        # $_CONDOR_SCRATCH_DIR. Keep in step with the htcondor profile, which
+        # explains the sizing (tests/test_snakefacade.py pins the two together).
+        'htcondor_request_disk_mb=4000',
         'htcondor_request_mem_mb=4000',
     ]
 

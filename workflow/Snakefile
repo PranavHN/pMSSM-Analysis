@@ -19,12 +19,36 @@ Config keys (all may arrive as strings via --config):
   runid       batch mode: run identifier replacing the condor ClusterId (digits, dot-free)
   base_seed   batch mode: seed base; per-batch seed = blake2b(runid:base_seed:b) (default 123)
   batches     batch mode: number of batches (genModels.py --num_jobs)
-  scan_parent batch mode: directory holding the scan.<runid>.<b> dirs (default ".")
+  scan_parent batch mode: directory holding the scan.<runid>.<b> dirs (default ".").
+              Passed through os.path.expandvars, so it may name a per-job location
+              that exists only on the worker: genModels.py --backend htcondor
+              defaults it to "$_CONDOR_SCRATCH_DIR/scan". The submit-side
+              orchestrator leaves that unexpanded and never touches those paths
+              (its only batch targets are the published markers below); each job
+              re-parses this file and resolves it to its own scratch dir.
+  meta_parent directory holding the SHARED bookkeeping r3mg/ tree: published
+              markers, run metadata and the DAG snapshot (default: scan_parent —
+              one place, which is what a shared-FS run wants). Split from
+              scan_parent when the scan dirs are ephemeral, because the
+              orchestrator reads the markers and they must outlive the job.
   publish     "none" | "eos" (batch mode: copy tarball+ntuple+config to $EOSPATH/<runid>/<b>/)
   keep_local  "0" (default) | "1" — with publish=eos, "0" deletes each batch's
               scan dir + tarball once its published copies verify, so the run
-              occupies no space outside $EOSPATH; "1" keeps both (the r3mg
+              occupies no space outside $EOSPATH; "1" keeps both (the shared r3mg
               bookkeeping is kept either way, so resume still works)
+
+Two bookkeeping roots, because they have different lifetimes:
+  WORK  (= <scan_parent>/r3mg) per-batch manifests — points.npz, step_*.json,
+        chain.json. These describe the CONTENT of a scan dir, so they have to
+        share its lifetime: the step/ntuple rules refuse to run against manifests
+        whose scan dir has vanished (r3mg_batch.py's out-of-sync guards). Keeping
+        them next to the data means an evicted ephemeral batch simply re-runs
+        whole, instead of resuming into that guard and demanding a manual rm -rf.
+  META  (= <meta_parent>/r3mg) shared, run-scoped state: published.ok markers,
+        run.<runid>.yaml, dag.<runid>.*. Read by the orchestrator, so it must
+        survive the job that wrote it.
+They are the SAME directory unless meta_parent is set, so a shared-FS run is
+byte-for-byte unchanged by the split.
 
 Parse-time purity: this file (and the included .smk files) import ONLY the
 stdlib + yaml — remote executors re-parse it inside every job, where the
@@ -68,7 +92,10 @@ SEED        = int(config.get("seed", 123))
 RUNID       = str(config.get("runid", "0"))
 BASE_SEED   = int(config.get("base_seed", 123))
 BATCHES     = int(config.get("batches", 2))
-SCAN_PARENT = str(config.get("scan_parent", ".")).rstrip("/")
+# expandvars, so scan_parent may be a per-job location ("$_CONDOR_SCRATCH_DIR/scan")
+# that resolves differently in each worker and stays literal on the submit host.
+SCAN_PARENT = os.path.expandvars(str(config.get("scan_parent", ".")).rstrip("/"))
+META_PARENT = os.path.expandvars(str(config.get("meta_parent", "") or "")).rstrip("/")
 PUBLISH     = str(config.get("publish", "none"))
 KEEP_LOCAL  = str(config.get("keep_local", "0")).lower() in ("1", "true", "yes")
 
@@ -155,8 +182,11 @@ else:
     SCANS = {}
 
 # Snakemake bookkeeping lives OUTSIDE the scan dirs so tarball contents stay
-# byte-compatible with the legacy layout.
-META = os.path.normpath(f"{SCAN_PARENT}/r3mg")
+# byte-compatible with the legacy layout. Two roots with different lifetimes
+# (see the module docstring): WORK travels with the scan data, META outlives it.
+# Identical unless meta_parent is set, so the shared-FS layout is unchanged.
+WORK = os.path.normpath(f"{SCAN_PARENT}/r3mg")
+META = os.path.normpath(f"{META_PARENT or SCAN_PARENT}/r3mg")
 WARM = f"{REPO}/build/.warm"
 
 CFG_OPT = f"--config_file {CONFIG_FILE}" if CONFIG_FILE else ""

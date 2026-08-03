@@ -44,7 +44,13 @@ default-resources:
   # plugin adds the quotes the submit file needs (+JobFlavour = "tomorrow")
   classad_JobFlavour: "'tomorrow'"
   classad_MaxRuntime: 604800            # legacy +MaxRuntime parity (7 days)
-  htcondor_request_disk_mb: 700         # legacy RequestDisk = 700000 KiB
+  # The legacy RequestDisk was 700000 KiB, sized for a job whose scan dir lived on
+  # shared storage: scratch then held only stdout/stderr and the transferred logs.
+  # genModels.py now puts the batch data IN $_CONDOR_SCRATCH_DIR by default (see its
+  # --scan_dir), so the request has to cover the scan dir (~1 GB at the 10k-model
+  # cap) plus the tarball built beside it, plus headroom. Under-requesting here does
+  # not fail cleanly — the job fills its scratch and dies mid-batch.
+  htcondor_request_disk_mb: 4000
   htcondor_request_mem_mb: 4000
 
 set-threads:

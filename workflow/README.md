@@ -123,10 +123,20 @@ Four constraints that are easy to break and expensive to debug:
    batch from scratch to re-create exactly what publish just deleted.
 
 5. **Bookkeeping stays outside the scan dirs.** Manifests and markers live under
-   `<scan_parent>/r3mg/` ([Snakefile:159](Snakefile#L159)) so tarball contents
-   stay byte-identical to the legacy layout. Per-model files inside the scan dir
-   are *not* declared outputs (failed models legitimately have none) — hence the
-   explicit out-of-sync guards in `r3mg_batch.py`'s `step` and `ntuple`.
+   `r3mg/` so tarball contents stay byte-identical to the legacy layout. Per-model
+   files inside the scan dir are *not* declared outputs (failed models legitimately
+   have none) — hence the explicit out-of-sync guards in `r3mg_batch.py`'s `step`
+   and `ntuple`.
+
+6. **Bookkeeping splits by lifetime.** Those guards are why there are two roots:
+   `WORK` (`<scan_parent>/r3mg/`) holds the per-batch manifests and `META`
+   (`<meta_parent>/r3mg/`) the `published.ok` markers, run metadata and DAG
+   snapshot. The same directory unless `meta_parent` is set. A manifest describes
+   the contents of its scan dir, so it must not outlive it — otherwise an evicted
+   batch whose data is gone resumes into the out-of-sync guard and needs a manual
+   `rm -rf`. A marker must outlive the job, because the submit-side orchestrator
+   reads it to decide what is finished. That is what lets `genModels.py --backend
+   htcondor` put the batch data in each worker's `$_CONDOR_SCRATCH_DIR`.
 
 ## Environment
 

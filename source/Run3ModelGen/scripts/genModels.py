@@ -24,9 +24,20 @@ def _explicit(ctx, name):
     return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
 
 
+# Default batch-data root for --backend htcondor. HTCondor exports
+# _CONDOR_SCRATCH_DIR per job and deletes the directory when the job exits, so this
+# must reach snakemake UNEXPANDED: the workflow expandvars-resolves it when each
+# worker re-parses the Snakefile, giving every batch its own node-local scan dir.
+# Nothing on the submit host ever resolves or touches it.
+CONDOR_SCRATCH_SCAN = "$_CONDOR_SCRATCH_DIR/scan"
+
+# Rough per-batch footprint of a scan dir at the 10k-model cap, for size warnings.
+_GB_PER_BATCH = 1
+
+
 @click.command()
 @click.option('--config_file', default=None, help='Yaml file containing scan configuration. If no config is provided, will read from the default.')
-@click.option('--scan_dir', default="scan", type=str, help='Scan output directory (with --num_jobs > 1: the parent directory holding the scan.<runid>.<b> batch dirs).')
+@click.option('--scan_dir', default="scan", type=str, help='Scan output directory (with --num_jobs > 1: the parent directory holding the scan.<runid>.<b> batch dirs). Batch runs on --backend htcondor default instead to each worker\'s $_CONDOR_SCRATCH_DIR (requires --publish); naming a shared-storage directory here opts back out, and warns about the size.')
 @click.option('--seed', default=123, type=int, help='Seed for np random number generation (single-scan mode only).')
 @click.option('--backend', default="local", type=click.Choice(snakefacade.BACKENDS), help='Where to run: locally, or submitted via SLURM/HTCondor.')
 @click.option('--num_jobs', default=1, type=click.IntRange(min=1), help='Number of batch jobs; each generates num_models models from the config.')
@@ -46,15 +57,32 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
     generates one scan at --scan_dir, overwriting it (fresh-scan semantics);
     --num_jobs N > 1 fans out N batches under --scan_dir without ever wiping —
     re-running the same command resumes an interrupted run.
+
+    Batch runs on --backend htcondor write each batch to its own worker's
+    $_CONDOR_SCRATCH_DIR rather than to --scan_dir, so N concurrent batches cost
+    the submit volume nothing but bookkeeping; only the published copies leave the
+    node, which is why that default requires --publish. Pass --scan_dir explicitly
+    to keep the batch data on shared storage instead.
     '''
-    # ABSOLUTE, always (batch mode does the same for its parent below). A cluster
-    # worker does not run in the submit directory — HTCondor gives the job its own
-    # scratch dir — while snakemake is told the filesystem is shared and stages
-    # nothing. A relative scan_dir therefore resolves against the worker's scratch:
-    # the scan, and the r3mg bookkeeping that makes the run resumable, would be
-    # built somewhere the orchestrator cannot see.
-    scan_dir = os.path.abspath(scan_dir)
     batch = num_jobs > 1
+
+    # HTCondor batch runs put the batch data on the worker by DEFAULT: a scan dir is
+    # ~1 GB per 10k-model batch, and N of them landing on shared storage at once is
+    # what makes a wide run run the submit volume out of quota. Only the published
+    # copies then leave the node, so this requires --publish (checked below).
+    # An explicit --scan_dir opts back into the shared-FS layout, with a warning.
+    scratch_scan = backend == "htcondor" and batch and not _explicit(ctx, 'scan_dir')
+
+    if not scratch_scan:
+        # ABSOLUTE, always (batch mode does the same for its parent below). A cluster
+        # worker does not run in the submit directory — HTCondor gives the job its own
+        # scratch dir — while snakemake is told the filesystem is shared and stages
+        # nothing. A relative scan_dir therefore resolves against the worker's scratch:
+        # the scan, and the r3mg bookkeeping that makes the run resumable, would be
+        # built somewhere the orchestrator cannot see. (scratch_scan asks for exactly
+        # that placement, deliberately, and keeps the bookkeeping behind on shared
+        # storage instead — see the batch-mode section.)
+        scan_dir = os.path.abspath(scan_dir)
 
     # ── flag-combination validation (before ANY side effect) ──────────────
     if _explicit(ctx, 'seed') and batch:
@@ -73,11 +101,41 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
         raise click.UsageError(
             "--keep_local only means something with --publish: without it nothing is "
             "copied to EOS and the scan dirs are always kept.")
+    if scratch_scan and not publish:
+        raise click.UsageError(
+            f"--backend htcondor writes each batch into its worker's $_CONDOR_SCRATCH_DIR, "
+            f"which HTCondor destroys when the job exits — without --publish the run would "
+            f"produce nothing you can read afterwards. Either add --publish (each batch's "
+            f"tarball + ntuple go to $EOSPATH/<runid>/<b>/), or name a shared-storage "
+            f"--scan_dir to keep the batches on disk instead (~{_GB_PER_BATCH} GB per "
+            f"10k-model batch, so ~{_GB_PER_BATCH * num_jobs} GB for this run).")
+    if scratch_scan and keep_local:
+        # Unreachable via the check above (keep_local implies publish), but explicit:
+        # keeping a copy of a directory that dies with the job is meaningless, and it
+        # would also put the ntuples back in the target list at paths that only ever
+        # exist on a worker — the orchestrator would wait for them forever.
+        raise click.UsageError(
+            "--keep_local keeps every batch's scan dir and tarball next to the run, but the "
+            "htcondor default writes them to per-job scratch that dies with the job. Name a "
+            "shared-storage --scan_dir to use --keep_local.")
     if _explicit(ctx, 'flavour') and backend != "htcondor":
         raise click.UsageError(f"--flavour sets the HTCondor JobFlavour; the {backend} backend takes its "
                                f"runtimes from workflow/profiles/{backend}/config.yaml.")
     if _explicit(ctx, 'log_dir') and backend == "local":
         log.warning("--log_dir is ignored on the local backend (output goes to the terminal).")
+    if backend == "htcondor" and batch and not scratch_scan:
+        # Opting out of per-job scratch onto shared storage. This is the combination
+        # that fills volumes: every batch keeps its whole scan dir there at once.
+        freed = (" They are freed per batch as --publish verifies its EOS copies, but the "
+                 "peak is what has to fit." if publish else
+                 " Nothing is freed during the run, and without --publish nothing is copied "
+                 "off it either.")
+        log.warning(
+            f"--scan_dir puts the batch data on shared storage: all {num_jobs} batches write "
+            f"their scan dirs under {scan_dir} concurrently. That is routinely much larger "
+            f"than expected — about {_GB_PER_BATCH} GB per 10k-model batch, so on the order of "
+            f"{_GB_PER_BATCH * num_jobs} GB at peak for this run.{freed} Omit --scan_dir to "
+            f"write each batch to its own worker's $_CONDOR_SCRATCH_DIR instead.")
     if runid is not None and not runid.isdigit():
         raise click.UsageError(f"--runid must be digits only (ClusterId-shaped), got '{runid}'.")
     if config_file is not None and not os.path.isfile(config_file):
@@ -133,7 +191,18 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
         return
 
     # ── batch mode: N batches under <scan_dir>/, resume-friendly ──────────
-    parent = os.path.abspath(scan_dir)
+    # Two roots with different lifetimes (see the Snakefile docstring). `parent` is
+    # the PERSISTENT one — run metadata, logs, published markers, resume state — and
+    # everything submit-side keys off it. `scan_parent` holds the batch data and may
+    # be per-job and ephemeral. They are the same directory unless scratch_scan.
+    if scratch_scan:
+        # Bookkeeping stays exactly where a shared-FS run would have put it (the
+        # --scan_dir default, i.e. ./scan), so logs, run metadata and resume are
+        # unchanged; only the bulky batch dirs move onto the workers.
+        scan_parent = CONDOR_SCRATCH_SCAN
+        parent = os.path.abspath(scan_dir)
+    else:
+        scan_parent = parent = os.path.abspath(scan_dir)
     os.makedirs(parent, exist_ok=True)
     meta_dir = f"{parent}/r3mg"
     runid = runid or snakefacade.default_runid()
@@ -190,7 +259,8 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
         log.info(f"Note: {parent} also holds batches of run(s) {', '.join(others)} — fine, all outputs are namespaced by runid.")
 
     cfg = {"mode": "batch", "runid": runid, "batches": num_jobs, "base_seed": base_seed,
-           "scan_parent": parent, "publish": "eos" if publish else "none",
+           "scan_parent": scan_parent, "meta_parent": parent,
+           "publish": "eos" if publish else "none",
            "keep_local": "1" if keep_local else "0", "config_file": run_config}
     argv = snakefacade.snakemake_argv(backend, cfg,
                                       extra=snakefacade.scheduler_extra(backend, log_dir, flavour))
@@ -198,6 +268,11 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
     substr = f"0-{num_jobs-1}" if num_jobs > 1 else "0"
     flavour_note = f", JobFlavour {flavour}" if backend == "htcondor" else ""
     log.info(f"Submitting run {runid} ({num_jobs} batch jobs{flavour_note}) via snakemake [backend: {backend}]...")
+    if scratch_scan:
+        log.info(f"Each batch runs entirely in its own worker's $_CONDOR_SCRATCH_DIR — nothing but "
+                 f"its published copies leaves the node, so this run needs no room under {parent} "
+                 f"beyond the bookkeeping in {meta_dir}. An evicted batch leaves nothing behind "
+                 f"and simply re-runs whole on resume.")
 
     if backend == "local" or foreground:
         if cluster:
@@ -207,7 +282,10 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
         rc = snakefacade.run_foreground(argv)
         if rc == 0 and publish:
             log.info(f"The .tar ball and ntuple of every batch are saved in {os.environ['EOSPATH']}/{runid}/{substr}")
-            log.info(f"Local scan dirs and tarballs were removed after their published copies verified."
+            log.info("Each batch's scan dir and tarball lived on its worker's scratch and went "
+                     "with the job; the published copies are the run's only output."
+                     if scratch_scan else
+                     f"Local scan dirs and tarballs were removed after their published copies verified."
                      if not keep_local else
                      f"--keep_local: the scan dirs and tarballs are also still in {parent}.")
         sys.exit(rc)
@@ -222,7 +300,10 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
     log.info(f"To resume after an interruption: re-run this exact command (finished batches are skipped).")
     if publish:
         log.info(f"After your models have finished generating, the .tar ball and ntuple will be saved in {os.environ['EOSPATH']}/{runid}/{substr}")
-        log.info("Each batch's local scan dir and tarball are removed as soon as its published "
+        log.info("Each batch's scan dir and tarball stay on its worker and go with the job; the "
+                 "published copies are the run's only output."
+                 if scratch_scan else
+                 "Each batch's local scan dir and tarball are removed as soon as its published "
                  "copies verify (--keep_local to keep them too)."
                  if not keep_local else
                  f"--keep_local: the scan dirs and tarballs are kept in {parent} as well.")

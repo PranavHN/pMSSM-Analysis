@@ -41,7 +41,7 @@ log path is printed at submission). `local` always runs in the foreground.
 | flag | default | applies to | meaning |
 | - | - | - | - |
 | `--config_file` | default config | always | scan config yaml (validated before anything is wiped) |
-| `--scan_dir` | `scan` | always | the scan dir (`--num_jobs 1`) or the parent of the `scan.<runid>.<b>` batch dirs (`--num_jobs > 1`) |
+| `--scan_dir` | `scan` (htcondor batch: each worker's `$_CONDOR_SCRATCH_DIR/scan`) | always | the scan dir (`--num_jobs 1`) or the parent of the `scan.<runid>.<b>` batch dirs (`--num_jobs > 1`) — see [Batch data on the worker](#batch-data-on-the-worker) |
 | `--seed` | 123 | single | numpy seed, used as-is |
 | `--backend` | `local` | always | `local` \| `slurm` \| `htcondor` |
 | `--num_jobs` | 1 | always | 1 → single mode (fresh-scan overwrite); N → batch mode (never wipes, resumable) |
@@ -131,8 +131,10 @@ Rule bodies live in `workflow/scripts/r3mg_batch.py` (internal CLI:
 by hand — it is deliberately not on `PATH`);
 every rule shell first sources `build/setup.sh`, reproducing the legacy condor
 worker environment on all executors. Bookkeeping (per-step manifests, markers)
-lives under `<scan_parent>/r3mg/`, **outside** the scan dirs, so tarball contents
-are unchanged.
+lives under `r3mg/`, **outside** the scan dirs, so tarball contents are unchanged —
+in one root by default, split into `<scan_parent>/r3mg/` (manifests) and
+`<meta_parent>/r3mg/` (markers, run metadata) when the scan dirs are ephemeral; see
+[Publishing is a move](#publishing-is-a-move).
 
 ## SModelS cross sections (immutable SPheno outputs)
 
@@ -187,13 +189,29 @@ otherwise), and the check fails closed: if any destination is missing, short, or
 unreadable, nothing is deleted and the rule fails with the mismatch listed. The
 local copies are therefore only ever removed once EOS demonstrably has them.
 
-What survives is `<scan_parent>/r3mg/`: the per-step manifests, the sampled
-points and the `published.ok` markers — a few hundred KB per batch. That is what
+What survives is the `r3mg/` bookkeeping — the per-step manifests, the sampled
+points and the `published.ok` markers, a few hundred KB per batch. That is what
 keeps a published run **resumable and inspectable**: re-running the same
 `genModels.py` command is a no-op rather than a full regeneration, and the
 per-step success counts stay readable. (Mechanically: with publishing on, the
 ntuples drop out of the workflow's target list, because snakemake regenerates a
 missing *requested* file while leaving a missing *intermediate* alone.)
+
+That bookkeeping has **two roots**, because its pieces have different lifetimes:
+
+| root | config key | holds | lifetime |
+| - | - | - | - |
+| `WORK` | `<scan_parent>/r3mg/` | per-batch manifests: `points.npz`, `step_*.json`, `chain.json` | travels with the scan data |
+| `META` | `<meta_parent>/r3mg/` | `published.ok`, `run.<runid>.yaml`, `dag.<runid>.*` | outlives the job |
+
+They are the **same directory** unless `meta_parent` is set, so a shared-filesystem
+run is unchanged. The split exists for ephemeral scan dirs (next section): a
+manifest describes the *contents* of its scan dir, and the `step`/`ntuple` bodies
+refuse to run against a manifest whose files have vanished. Keeping manifests next
+to the data means an evicted batch simply re-runs whole; leaving them on shared
+storage would make it resume straight into that out-of-sync guard and demand a
+manual `rm -rf`. The markers go the other way: the orchestrator on the submit host
+reads them to decide what is finished, so they must not live on a worker.
 
 `--keep_local` opts out and keeps both copies — useful for debugging, for
 `rerunStep.py` on a published batch, or when the scan dirs are the product and
@@ -201,6 +219,50 @@ EOS is just a backup. Budget the disk for the whole run before using it.
 
 Extraction is unaffected: `extractModels.py --eos_dir $EOSPATH/<runid>` reads the
 published tarballs, which is the normal way to consume a published run.
+
+## Batch data on the worker
+
+On `--backend htcondor`, batch runs write each batch into **its own worker's
+`$_CONDOR_SCRATCH_DIR/scan`** rather than under `--scan_dir`. Only the published
+copies leave the node, so N concurrent batches cost the submit volume nothing
+beyond the `META` bookkeeping.
+
+This is not a tuning knob, it is the difference between a wide run working and
+not. With the batch data on shared storage, peak footprint is *all batches at
+once* — the htcondor profile submits every batch immediately rather than in waves
+(`jobs: 10000`), so a 300-batch run needs ~340 GB of scan dirs simultaneously. A
+real 300-batch run died exactly there: the submit volume hit its quota within the
+hour, every job failed in HTCondor's output transfer with `(errno 122) Disk quota
+exceeded`, all 300 were held, and `SYSTEM_PERIODIC_REMOVE` reaped them 24 h later.
+Nothing was published; 300 batches of compute produced nothing.
+
+Consequences worth knowing:
+
+- **`--publish` is required.** Scratch is destroyed when the job exits, so a run
+  whose results never reach EOS produces nothing. `genModels.py` refuses the
+  combination up front rather than spending the cluster time.
+- **`--keep_local` is refused** for the same reason: there is nothing to keep, and
+  it would put the ntuples back in the target list at paths that only ever exist
+  on a worker, which the orchestrator would then wait for forever.
+- **Eviction costs the whole batch.** The work is on the node, so an evicted batch
+  restarts from sampling rather than resuming mid-pipeline. It leaves nothing
+  behind and re-runs cleanly on the next `genModels.py` invocation.
+- **The disk request must cover a batch.** `htcondor_request_disk_mb` is 4000 in
+  the htcondor profile (and repeated in `snakefacade.flavour_resources`, which
+  *replaces* the profile block). Under-requesting does not fail cleanly — the job
+  fills its scratch and dies mid-batch.
+
+Pass `--scan_dir` explicitly to opt back into the shared-filesystem layout;
+`genModels.py` then warns with the projected peak for that run. The `slurm` and
+`local` backends are unaffected — only HTCondor hands each job a private scratch
+directory that it then deletes.
+
+The mechanism: `scan_parent` reaches snakemake as the **unexpanded** string
+`$_CONDOR_SCRATCH_DIR/scan`, because HTCondor only defines that variable inside a
+job. The Snakefile runs `os.path.expandvars` over it, so the submit-side
+orchestrator keeps the literal (it never touches those paths — its only batch
+targets are the `published.ok` markers) while each worker, re-parsing the Snakefile
+inside its own job, resolves it to that job's scratch directory.
 
 ## Batch identity & reproducibility
 
@@ -257,9 +319,12 @@ Note the generic `step` rule appears as a single node in `--rulegraph`; use
 - `workflow/profiles/slurm` — native SLURM submission. One cluster job per batch
   (all per-batch rules share a snakemake *group*), `slurm-requeue`, retries.
   Site defaults target viper (`general` partition; put `scan_parent` on `/ptmp`).
-- `workflow/profiles/htcondor` — native HTCondor submission (CERN lxplus
-  shared-FS model). JobFlavour/MaxRuntime/RequestDisk/RequestCpus map to
-  `classad_*`/`htcondor_*` resources with the historical values; per-job logs
+- `workflow/profiles/htcondor` — native HTCondor submission (CERN lxplus; shared-FS
+  checkout and `.pixi` env, but the batch DATA goes to per-job scratch by default —
+  see [Batch data on the worker](#batch-data-on-the-worker)).
+  JobFlavour/MaxRuntime/RequestDisk/RequestCpus map to
+  `classad_*`/`htcondor_*` resources; `RequestDisk` is no longer the historical
+  700 MB, because a batch's scan dir now lives in the job's scratch. Per-job logs
   land in `--htcondor-jobdir` (the entrypoints point that at `<log_dir>/outfiles`).
   String ClassAd values are passed **bare**; the plugin quotes them itself.
   Note that lxplus overrides two of the requests: `MaxRuntime` is derived from
