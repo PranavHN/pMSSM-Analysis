@@ -163,7 +163,7 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
         # ── single-scan mode: fresh-scan overwrite semantics, as always ────
         parent = os.path.dirname(scan_dir) or "."
         name = os.path.basename(scan_dir)
-        shutil.rmtree(scan_dir, ignore_errors=True)
+        pipeline.wipe_scan_dir(scan_dir)          # refuses to destroy an emcee chain.h5
         shutil.rmtree(f"{parent}/r3mg/{name}", ignore_errors=True)
 
         cfg = {"mode": "single", "scan_dir": scan_dir, "seed": seed}

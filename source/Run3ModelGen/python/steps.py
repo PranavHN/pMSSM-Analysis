@@ -34,6 +34,18 @@ class StructlogHandler(logging.Handler):
         log.bind(module=record.name).info(record.getMessage())
 
 
+def _timeout_prefix(timeout) -> str:
+    '''`timeout <N> ` shell prefix for os.system-invoked tools (empty when no
+    timeout is set). A timed-out tool exits non-zero and is treated as a failed
+    model by the caller — guards the emcee engine against a single hung binary
+    stalling a whole ensemble half-step. Default (None) leaves behaviour unchanged.
+
+    Formatted with :g (not int()) so a sub-second timeout survives: GNU `timeout`
+    accepts fractional seconds, and `int(0.5)` would collapse to `timeout 0`, which
+    means "no limit" — silently disabling the guard.'''
+    return f"timeout {float(timeout):g} " if timeout else ""
+
+
 def run_prep_input(point: dict, rawfilen: str, outfile: str) -> bool:
     '''Prep input: fill the raw SLHA template's EXTPAR with one sampled point.
 
@@ -72,7 +84,7 @@ def run_prep_input(point: dict, rawfilen: str, outfile: str) -> bool:
     return True
 
 
-def run_SPheno(infile: str, outfile: str, logfile: str, rawfilen: str) -> bool:
+def run_SPheno(infile: str, outfile: str, logfile: str, rawfilen: str, timeout=None) -> bool:
     '''Run SPheno and return True if successful. Re-add input blocks to output file if successful. Relevant for running tools on output file.
 
     SPheno reads its filename arguments into fixed-length Fortran buffers that
@@ -96,8 +108,11 @@ def run_SPheno(infile: str, outfile: str, logfile: str, rawfilen: str) -> bool:
         # NB: not named `log` — that would shadow the module-level logger for
         # the whole function (Python scopes assigned names function-wide).
         with open(logfile, 'wb') as logfh:
-            subprocess.run(["SPheno", local_in, local_out], cwd=workdir,
-                           stdout=logfh, stderr=subprocess.STDOUT)
+            try:
+                subprocess.run(["SPheno", local_in, local_out], cwd=workdir,
+                               stdout=logfh, stderr=subprocess.STDOUT, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return False
 
         # Hand the result over whether or not the run succeeded: previously SPheno
         # wrote straight into the scan dir, so a failed model left its (partial)
@@ -138,12 +153,12 @@ def run_SPheno(infile: str, outfile: str, logfile: str, rawfilen: str) -> bool:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def run_softsusy(infile: str, outfile: str) -> bool:
+def run_softsusy(infile: str, outfile: str, timeout=None) -> bool:
     '''Run softsusy and return True if successful.'''
 
     success = False
 
-    retcode = os.system(f"softpoint.x leshouches < {infile} &> {outfile}")
+    retcode = os.system(f"{_timeout_prefix(timeout)}softpoint.x leshouches < {infile} &> {outfile}")
     if retcode == 0: success = True
 
     # Validate output using same pyslha parsing as ntupling readSLHA
@@ -156,11 +171,19 @@ def run_softsusy(infile: str, outfile: str) -> bool:
     return success
 
 
-def run_micromegas(infile: str, outfile_raw: str, outfile: str) -> bool:
+def run_micromegas(infile: str, outfile_raw: str, outfile: str, timeout=None) -> bool:
     '''Run micromegas and return True if successful.'''
 
     # Run micromegas to get the raw, humanly readable output
-    os.system(f"main {infile} > {outfile_raw}")
+    retcode = os.system(f"{_timeout_prefix(timeout)}main {infile} > {outfile_raw}")
+
+    # Under the emcee engine (timeout set), a non-zero exit means `main` was killed
+    # by the timeout or crashed, leaving outfile_raw partial/empty — bail so the point
+    # is marked failed instead of feeding garbage to microextract. Only gated on the
+    # timeout path: with timeout=None (flat/grid/fixed/importance priors) behaviour is
+    # exactly as before, preserving the reference-count contract.
+    if timeout and retcode != 0:
+        return False
 
     # Extract values into outfile
     success = microextract(infilen = outfile_raw, outfilen = outfile)
@@ -168,7 +191,7 @@ def run_micromegas(infile: str, outfile_raw: str, outfile: str) -> bool:
     return success
 
 
-def run_superiso(infile: str, outfile: str) -> bool:
+def run_superiso(infile: str, outfile: str, timeout=None) -> bool:
     '''Run superiso and return True if successful.
 
     slha.x always writes its result to the FIXED name ``output.flha`` in the
@@ -181,8 +204,11 @@ def run_superiso(infile: str, outfile: str) -> bool:
     try:
         # Run superiso and pipe humanly readable output into null
         with open(os.devnull, 'wb') as devnull:
-            subprocess.run(["slha.x", os.path.abspath(infile)], cwd=workdir,
-                           stdout=devnull, stderr=devnull)
+            try:
+                subprocess.run(["slha.x", os.path.abspath(infile)], cwd=workdir,
+                               stdout=devnull, stderr=devnull, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return False
         # Move the auto-generated output file into the right location
         produced = os.path.join(workdir, "output.flha")
         if not os.path.exists(produced):
@@ -193,7 +219,7 @@ def run_superiso(infile: str, outfile: str) -> bool:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def run_feynhiggs(infile: str, outfile: str, logfile: str, rawfilen: str) -> bool:
+def run_feynhiggs(infile: str, outfile: str, logfile: str, rawfilen: str, timeout=None) -> bool:
     '''Run FeynHiggs and return True if successful. Re-add input blocks to output file if successful.
 
     FeynHiggs writes its result to ``<input>.fh-001`` NEXT TO the input file —
@@ -210,7 +236,7 @@ def run_feynhiggs(infile: str, outfile: str, logfile: str, rawfilen: str) -> boo
 
         # Run FeynHiggs with default flags (42423120 = full MSSM, 2-loop, recommended settings)
         # FeynHiggs creates output file with .fh-001 extension automatically
-        retcode = os.system(f"FeynHiggs {local_in} 42423120 &> {logfile}")
+        retcode = os.system(f"{_timeout_prefix(timeout)}FeynHiggs {local_in} 42423120 &> {logfile}")
 
         # Check return code first (simple success indicator)
         if retcode != 0:
@@ -263,19 +289,19 @@ def run_feynhiggs(infile: str, outfile: str, logfile: str, rawfilen: str) -> boo
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def run_gm2calc(infile: str, outfile: str) -> bool:
+def run_gm2calc(infile: str, outfile: str, timeout=None) -> bool:
     '''Run GM2Calc and return True if successful.'''
 
     success = False
 
     # Run superiso and pipe humanly readable output into null
-    retcode = os.system(f"gm2calc.x --slha-input-file={infile} > {outfile}")
+    retcode = os.system(f"{_timeout_prefix(timeout)}gm2calc.x --slha-input-file={infile} > {outfile}")
     if retcode == 0: success = True
 
     return success
 
 
-def run_evade(infile: str, outfile: str, evade_conffile: str, evade_infile: str) -> bool:
+def run_evade(infile: str, outfile: str, evade_conffile: str, evade_infile: str, timeout=None) -> bool:
     '''Run EVADE and return True if successful.'''
 
     success = False
@@ -284,7 +310,7 @@ def run_evade(infile: str, outfile: str, evade_conffile: str, evade_infile: str)
     convert_slha(infile, evade_infile, evade_conffile, outfile)
 
     # Run evade and pipe humanly readable output into null
-    retcode = os.system(f"EVADE_MSSM {evade_conffile} &>/dev/null")
+    retcode = os.system(f"{_timeout_prefix(timeout)}EVADE_MSSM {evade_conffile} &>/dev/null")
     if retcode == 0: success = True
 
     return success

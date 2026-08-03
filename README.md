@@ -28,6 +28,7 @@ Modern pMSSM model generation, orchestrated by a [Snakemake](https://snakemake.r
   - [Adding software/updating the software version](#adding-softwareupdating-the-software-version)
   - [Fixing the parameter points](#fixing-the-parameter-points)
   - [Gaps in the scan ranges](#gaps-in-the-scan-ranges)
+  - [Unlocking an interrupted scan](#unlocking-an-interrupted-scan)
   - [cmake\_build\_env.sh](#cmake_build_envsh)
   - [pixi](#pixi-1)
 
@@ -65,22 +66,25 @@ Please note that since pixi edits your `.bash_profile` automatically, it should 
 
 ## Run3ModelGen
 
-Having installed pixi, we can use the `pixi.toml` and `pixi.lock` files to start a shell with the correct environment and install the Run3ModelGen. Either let the `build` task do it:
+Having installed pixi, we can use the `pixi.toml` and `pixi.lock` files to start a shell with the correct environment and install the Run3ModelGen. Install the environments first, then build:
 
 ```bash
-pixi run build            # cmake configure + build, and installs the dagviz env
+pixi install -a           # all environments (default + rootenv + dagviz)
+pixi run build            # cmake configure + build
 pixi shell
 source build/setup.sh
 ```
 
+The two steps are separate on purpose: `pixi install` cannot run from inside a `pixi run` task, so the `build` task only builds. Installing only the default environment (plain `pixi install`) is enough to build and run scans — `-a` additionally gives you [`rootenv`](#environments) and the `dagviz` env that renders each run's `dag.svg`.
+
 or run the build commands yourself, which is the same thing spelled out:
 
 ```bash
+pixi install -a
 pixi shell
 cmake -S source -B build
 cmake --build build -j8
 source build/setup.sh
-pixi install -e dagviz    # what the task adds: renders each run's DAG as SVG
 ```
 
 ## Environments
@@ -96,7 +100,7 @@ pixi shell -e rootenv                    # Enter the ROOT environment
 pixi run -e rootenv python my_analysis.py  # Run a script in rootenv
 ```
 
-**`dagviz` environment** — [graphviz](https://graphviz.org/) only, used to render the DAG snapshot every run writes. `pixi run build` installs it for you; the manual equivalent is:
+**`dagviz` environment** — [graphviz](https://graphviz.org/) only, used to render the DAG snapshot every run writes. `pixi install -a` installs it along with everything else; on its own:
 
 ```bash
 pixi install -e dagviz
@@ -143,7 +147,7 @@ rerunStep.py --step micromegas --scan_dir scan     # re-runs micromegas + everyt
 rerunStep.py --step ntuple --scan_dir scan         # only rebuild the ntuple
 ```
 
-Every run saves its DAG into the scan dir (`dag.dot`, plus `dag.svg` once the [`dagviz` environment](#environments) is installed). Power users can drive the workflow directly with snakemake (`pixi run smk ...`); see [doc/snakemake.md](doc/snakemake.md) for the full guide: config keys, profiles, reproducibility.
+Every run saves its DAG into the scan dir (`dag.dot`, plus `dag.svg` once the [`dagviz` environment](#environments) is installed — `pixi install -a`). Power users can drive the workflow directly with snakemake (`pixi run smk ...`); see [doc/snakemake.md](doc/snakemake.md) for the full guide: config keys, profiles, reproducibility.
 
 ## Commands
 
@@ -155,15 +159,17 @@ Everything below is on your `PATH` after `source build/setup.sh`; each takes `--
 | [`rerunStep.py`](source/Run3ModelGen/scripts/rerunStep.py) | Re-run one pipeline step of an existing scan plus everything after it, then rebuild the ntuple. |
 | [`extractModels.py`](source/Run3ModelGen/scripts/extractModels.py) | Extract selected models for the pMSSMFactory — from one scan dir/tarball, or a whole published run with `--eos_dir`. See [Extracting interesting models](#extracting-interesting-models). |
 | [`genConfig.py`](source/Run3ModelGen/scripts/genConfig.py) | Write an example config for a given prior to start from. See [Changing the scan configuration](#changing-the-scan-configuration). |
-| [`mcmc_diagnostics.py`](source/Run3ModelGen/scripts/mcmc_diagnostics.py) | MCMC convergence diagnostics (split-R̂, bulk-ESS) across chain ntuples. See [Diagnostics](#diagnostics). |
+| [`emcee_diagnostics.py`](source/Run3ModelGen/scripts/emcee_diagnostics.py) | emcee/MCMC convergence diagnostics from `chain.h5` (R̂, bulk/tail ESS, τ, corner/trace/log-prob plots, input-vs-target scatter, burn-in check). Run via `pixi run emcee_diagnostics`. See [Diagnostics](#diagnostics). |
 
 Plus these pixi tasks, which need no sourced environment:
 
 | Task | What it does |
 | --- | --- |
+| `pixi install -a` | Install all pixi environments (do this once per checkout, before building). |
 | `pixi run build` | Configure and compile (micrOMEGAs, pythia8, `build/setup.sh`). |
 | `pixi run test` | Offline check suite: unit tests, the sampled-point golden file, and a DAG dry-run of every workflow mode (seconds; identical to what CI runs). |
 | `pixi run smk <args>` | Direct snakemake access for cases the scripts do not expose. |
+| `pixi run rediagnose <scan_dir>` | Re-run only the emcee diagnostics of an existing `prior: mcmc` scan, in place into `<scan_dir>/diag` (seconds, no sampling). See [doc/emcee.md](doc/emcee.md#re-running-only-the-diagnostics). |
 | `pixi run make-refs` / `upload-refs` | Maintainers: regenerate and upload the CI reference files. See [Reference files & CI regression check](#reference-files--ci-regression-check). |
 
 ## Sampling priors
@@ -174,7 +180,7 @@ Run3ModelGen supports five sampling priors:
 | --- | --- |
 | `flat` | Draws parameters uniformly at random within specified ranges. |
 | `fixed` | Runs the pipeline on a specific set of parameter points. |
-| `mcmc` | Metropolis-Hastings MCMC guided by physics constraints. See [MCMC sampling](#mcmc-sampling). |
+| `mcmc` | emcee affine-invariant ensemble sampler guided by physics constraints. See [MCMC sampling](#mcmc-sampling). |
 | `grid` | Cartesian product over specified parameter values. See [Grid sampling](#grid-sampling). |
 | `importance` | Perturbs known viable seed models with narrow Gaussians. See [Importance sampling](#importance-sampling). |
 
@@ -204,18 +210,26 @@ Example configs are stored in [source/Run3ModelGen/data/configs/](source/Run3Mod
 
 ## MCMC sampling
 
-MCMC sampling uses the Metropolis-Hastings algorithm to explore parameter space guided by physics observables. Instead of sampling uniformly, the chain preferentially visits regions where computed observables (e.g. Higgs mass, relic density) agree with experimental measurements.
+MCMC sampling uses the [emcee](https://emcee.readthedocs.io/en/stable/) affine-invariant ensemble sampler to explore parameter space guided by physics observables. Instead of sampling uniformly, an ensemble of walkers preferentially visits regions where computed observables (e.g. Higgs mass, relic density) agree with experimental measurements. The log-probability is `-chi2/2 + flat_prior`, with chi2 built from the `constraints` block. emcee's stretch move is affine-invariant — it adapts automatically to the local scale and correlations of the target, so there is **no proposal-width tuning**.
 
 To use MCMC, set `prior: mcmc` and define constraints in your config file:
 
 ```yaml
 prior: mcmc
-num_models: 500
+num_models: 1            # emcee uses one model per worker; keeps the >10000 guard happy
 
 mcmc:
-  burn_in: 100
-  max_attempts: 50000
-  accept_invalid: false
+  nwalkers: 64           # ensemble size (>= 2*ndim, even, = 2*nworkers)
+  nworkers: 32           # worker-pool size -> CPUs requested for the chain rule
+  max_steps: 20000       # iteration cap (convergence usually stops earlier)
+  burn_in: 200           # absolute floor (iterations) on the ntuple burn-in
+  check_every: 100       # autocorrelation / progress cadence (iterations)
+  init:
+    strategy: spread     # uniform across the prior (or `ball` around init.center_file)
+  moves:
+    - {type: StretchMove, kwargs: {a: 2.0}, weight: 1.0}
+  record_observables:    # emcee blobs -> ntuple branches
+    - {name: m_h, branch: SP_m_h, source: {step: SPheno, file_type: slha, block: MASS, entry: 25}}
 
 constraints:
   - name: higgs_mass
@@ -230,41 +244,33 @@ constraints:
 ```
 
 Key MCMC settings:
-- **`burn_in`**: Number of accepted steps to discard before collecting models.
-- **`max_attempts`**: Hard cap on total proposals (includes burn-in).
-- **`accept_invalid`**: If `false` (default), models where the pipeline failed are not saved.
-- **`proposal_widths`**: Optional per-parameter Gaussian step sizes (default: 5% of range).
-- **`adapt_proposals`** (optional): Robbins-Monro adaptive scaling of `proposal_widths` *during burn-in only*, to drive the rolling Metropolis acceptance rate toward `target_acceptance` (default 0.25 — Roberts-Gelman-Gilks high-D optimum). Adaptation stops automatically when burn-in ends so the post-burn-in chain remains detailed-balance-correct. Recommended unless you've already hand-tuned widths.
-  ```yaml
-  mcmc:
-    adapt_proposals:
-      enabled: true
-      target_acceptance: 0.25
-      window: 200
-      learning_rate: 0.05
-  ```
+- **`nwalkers`**: Ensemble size. Use `2 × nworkers`, keep it even, and at least `2 × ndim`.
+- **`nworkers`**: Worker-pool size; wired to the `chain` rule's CPUs-per-task.
+- **`max_steps`**: Iteration cap (the wall-clock guard / convergence check usually stops earlier).
+- **`burn_in`** / **`burn_in_factor`**: Ntuple burn-in = `max(burn_in, ceil(burn_in_factor × max_tau))`.
+- **`check_every`**, **`target_autocorr_factor`**, **`tau_rel_tol`**: Autocorrelation cadence and convergence targets (`N > factor × tau`, τ stable to the tolerance).
+- **`walltime_hours`**: Wall-clock guard budget (keep below the `chain` rule's runtime).
+- **`init.strategy`**: `spread` (uniform across the prior) or `ball` (around `init.center_file`).
+- **`moves`**: emcee moves (default `StretchMove(a=2.0)`; a DE-move mix helps harder targets).
+- **`record_observables`**: `{name, branch, source}` list recorded as blobs → ntuple branches.
+
+A top-level `tool_timeout` (seconds) wraps each external physics-tool call so a single hung binary can't stall an ensemble half-step. The chain runs the whole pipeline inside sampling and checkpoints to `chain.h5` (an [`emcee.backends.HDFBackend`](https://emcee.readthedocs.io/en/stable/user/backends/)) in the scan dir — this is undeclared side-state, so re-running the `chain` rule **resumes** an unconverged chain instead of wiping it.
 
 ### Diagnostics
 
-Each chain emits per-window log lines with the *Metropolis acceptance rate* (`accept_metro`) and the pipeline-validity rate, plus a parseable end-of-run summary line:
-
-```
-[mcmc-summary] proposed=12345 metro_accepted=3094 metro_accept_rate=0.2506 ...
-```
-
-Use `accept_metro` (not the commit rate) to judge proposal-width tuning — values outside ~10–60 % trigger a warning. To check across-chain convergence after a batch of jobs, run:
+Convergence is diagnosed from the `chain.h5` backend(s) with `emcee_diagnostics.py`, which reports mean acceptance fraction, integrated autocorrelation time τ per parameter (and the τ-vs-N curve), Gelman-Rubin R̂ and bulk/tail ESS (via arviz, within and across independent ensembles), a burn-in check, and corner/trace/log-prob plots plus an input-vs-target scatter. It finishes with a **criteria table** — each convergence requirement, why it exists (with an arXiv reference), and whether this scan meets it — and a CONVERGED / NOT CONVERGED verdict gated on the three hard criteria (`N > 50τ`, R̂ < 1.05, ESS_bulk ≥ 400); see [doc/emcee.md](doc/emcee.md#convergence-checklist). It uses the same τ-scaled discard rule as the sampler's ntuple, and can emit a ROOT `"susy"` ntuple per ensemble so `extractModels` keeps working:
 
 ```bash
-python source/Run3ModelGen/scripts/mcmc_diagnostics.py --data-dir /path/to/ntuple_dir
-# Or skip the file-level Ω-straddle filter to diagnose the unfiltered sampler:
-python source/Run3ModelGen/scripts/mcmc_diagnostics.py --data-dir /path/to/ntuple_dir --no-file-cut
+pixi run emcee_diagnostics \
+    --glob "/ptmp/$USER/run3modelgen/<runid>/scan.*/chain.h5" \
+    --outdir results/<runid>/diag --to-ntuple results/<runid>/ntuples
 ```
 
-This computes split-R̂ (Vehtari et al. 2021) and bulk-ESS per free parameter across all chain ROOT files in the directory, treating each file as a separate chain. Targets are `R̂ < 1.05` and `ESS > 400`. R̂ ≫ 1 means chains haven't mixed (likely needs wider proposals or longer chains); ESS ≪ raw sample count means within-chain autocorrelation is long (likely needs wider proposals).
+Aim for a mean acceptance fraction of ~0.2–0.5, `N > 50 × τ` for every parameter, cross-ensemble R̂ < 1.01 (≤ 1.05 acceptable) and ESS_bulk ≫ 400. If `N < 50τ`, re-run the chain (`--forcerun chain`) to add iterations.
 
 For a tuned starting config on relic-density-only scans, see [`example_mcmc_relic_tuned.yaml`](source/Run3ModelGen/data/configs/example_mcmc_relic_tuned.yaml).
 
-For full details, see [doc/mcmc.md](doc/mcmc.md). For constraint specification, see [doc/constraints.md](doc/constraints.md).
+For full details, see [doc/emcee.md](doc/emcee.md). For constraint specification, see [doc/constraints.md](doc/constraints.md).
 
 ## Grid sampling
 
@@ -386,7 +392,7 @@ Detailed documentation is available in the [doc/](doc/) directory:
 - [doc/snakemake.md](doc/snakemake.md) - Snakemake workflow: entrypoint flag reference (`--backend`, batch mode, resume), rule graph, profiles (local/slurm/htcondor), re-running steps, reproducibility, DAG snapshots
 - [workflow/README.md](workflow/README.md) - Workflow *sources* layout (for contributors): which rule lives in which `.smk`, the `r3mg_batch.py` subcommand interface, and the invariants a change must respect
 - [doc/ntuple.md](doc/ntuple.md) - NTuple structure: tree layout, branch naming, and per-tool branch groups
-- [doc/mcmc.md](doc/mcmc.md) - MCMC sampling algorithm, configuration, and output
+- [doc/emcee.md](doc/emcee.md) - MCMC (emcee) sampling: algorithm, configuration keys, run commands, diagnostics, resume, and output
 - [doc/constraints.md](doc/constraints.md) - Physics constraints specification (types, sources, examples)
 - [doc/configs.md](doc/configs.md) - Configuration system, prior types, and `genConfig.py` usage
 - [doc/pixi.md](doc/pixi.md) - pixi package manager: environments, tasks, dependencies
@@ -458,6 +464,25 @@ parameters:
   M_2: [[-3000, -1000], [-1000, 800], [1000, 3000]]
 ...
 ```
+
+## Unlocking an interrupted scan
+
+Snakemake locks its working directory (the scan parent — `run/` for the local backend)
+while a run is in progress. If a run is killed — Ctrl-C, a crash, a node/power loss, or
+two scans launched into the same directory at once — a stale lock can be left behind, and
+the next run fails with `LockException: ... Directory cannot be locked`.
+
+With no Snakemake actually running, clear the lock and re-run — either delete it directly:
+```bash
+rm -rf run/.snakemake/locks
+```
+or use Snakemake's `--unlock` (paths as the local backend launches it, from `run/`):
+```bash
+pixi run smk --workflow-profile ../workflow/profiles/local --unlock \
+    --config mode=single scan_dir=<scan dir> config_file=<config>
+```
+Avoid launching two scans into the same scan parent (`run/`) at once — the most common
+way to trip the lock.
 
 ## cmake_build_env.sh
 

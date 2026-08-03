@@ -10,9 +10,9 @@ The caller owns the RNG state: np.random.seed(seed) is applied by
 ModelGenerator.__init__ (or by the Snakemake sample rule) BEFORE calling
 into this module, and nothing here reseeds.
 
-The MCMC (Metropolis-Hastings) chain sampler stays in ModelGenerator
-(sample_mcmc): it runs the whole pipeline inside sampling and is executed
-as one opaque chain job, not as a point sampler.
+The MCMC prior (prior: mcmc) is the emcee ensemble sampler
+(Run3ModelGen.emcee_sampler): it runs the whole pipeline inside sampling and is
+executed as one opaque chain job, not as a point sampler here.
 '''
 
 import os

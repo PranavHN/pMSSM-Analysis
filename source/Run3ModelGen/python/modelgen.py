@@ -15,7 +15,6 @@ from Run3ModelGen import sampling
 from Run3ModelGen import steps as toolsteps
 from Run3ModelGen.steps import StructlogHandler  # re-exported for backwards compatibility
 import Run3ModelGen.csvReader as csvReader
-import shutil
 
 import structlog
 import logging
@@ -38,16 +37,34 @@ class ModelGenerator:
             print(logo)
 
         self.config_file = config_file
-        self.scan_dir = scan_dir
         self.rawfilen = f"{datadir}/raw.slha"
-        self.seed = seed
         self.points = {}
-        
+
         # Add all keys in config_file as attributes. Replace attribute by default if not
         # provided; extra keys not in the default (e.g. 'grid') are carried through.
         default_config = f"{datadir}/configs/default_config.yaml"
-        for key, value in pipeline.load_scan_config(self.config_file, default_config).items():
+        merged = pipeline.load_scan_config(self.config_file, default_config)
+        for key, value in merged.items():
             setattr(self, key, value)
+
+        # A config carrying these keys is almost always a _dump_scan_config() output being
+        # reused as an input. Harmless now that the caller wins below, but say so: the
+        # values in the file are NOT what this run will use.
+        reused = [k for k in ('scan_dir', 'seed') if k in merged]
+        if reused and not quiet:
+            log.warning(
+                f"config {self.config_file} carries provenance key(s) {reused} — ignoring "
+                f"them in favour of the caller's scan_dir={scan_dir!r}, seed={seed!r}. "
+                f"(Looks like a dumped scan_config.yaml reused as an input config.)")
+
+        # CALLER-OWNED, set AFTER the config loop so the config can never override them.
+        # _dump_scan_config() writes scan_dir/seed into <scan_dir>/scan_config.yaml as
+        # PROVENANCE (where this scan ran, with which seed). Feeding such a dump back in
+        # as --config_file used to silently redirect every file operation -- including the
+        # fresh-scan wipe in r3mg_batch.py sample -- at the recorded scan dir rather than
+        # the one the caller asked for. They are outputs of a scan, never inputs to one.
+        self.scan_dir = scan_dir
+        self.seed = seed
 
         # Drop pipeline steps whose external tool is not installed on this platform
         # (e.g. FeynHiggs is not packaged on conda-forge for macOS).
@@ -58,7 +75,23 @@ class ModelGenerator:
         
         # Set numpy seed:
         np.random.seed(self.seed)
-        
+
+        # Derive the list of free (varying) parameters; fixed params have lo == hi.
+        # Used by the emcee sampler (prior: mcmc) to define the
+        # sampled dimensions.
+        self.free_names = [k for k, v in self.parameters.items() if not self._is_fixed(v)]
+
+        # Optional wall-clock timeout (seconds) for external physics-tool calls, read
+        # from the config if present (threaded into steps.py via run_step). Guards
+        # against a single hung binary stalling a whole emcee half-step. Default None
+        # keeps the point-sampled priors' behaviour unchanged.
+        self.tool_timeout = getattr(self, 'tool_timeout', None)
+
+        # Fail fast on a config whose constraint / record_observables sources reference a
+        # step that does not run (else _extract_observable returns None for every point and
+        # the emcee chain never moves), or a non-positive constraint uncertainty.
+        self._validate_observable_sources()
+
         # Print information on initialised generator
         if not quiet:
             log.info(f"Initialised ModelGenerator with:")
@@ -100,6 +133,40 @@ class ModelGenerator:
         for key in self.parameters:
             self.points[key] = np.zeros(size)
 
+    # ── emcee support: fixed-point fill + process-safe single-point evaluation ──
+    @staticmethod
+    def _is_fixed(scanrange) -> bool:
+        '''A parameter is fixed if it has a scalar [lo, hi] range with lo == hi.
+        Interrupted ranges (list-of-[lo,hi]) are never fixed.'''
+        if isinstance(scanrange[0], list):
+            return False
+        return scanrange[0] == scanrange[1]
+
+    def _init_fixed_points(self, modelnum: int = 0) -> None:
+        '''Write fixed-parameter values (lo == hi) into self.points[...][modelnum].
+        Free / interrupted-range params are overwritten per-evaluation by
+        evaluate_theta.'''
+        for key, scanrange in self.parameters.items():
+            if self._is_fixed(scanrange):
+                self.points[key][modelnum] = scanrange[0]
+
+    def evaluate_theta(self, theta, record_sources: list = None, modelnum: int = 0):
+        '''Run the full pipeline for a single free-parameter vector `theta`
+        (ordered as self.free_names) and return (chi2, observables_dict).
+
+        Reuses _run_and_evaluate (steps + chi2 from constraints) and
+        _extract_observable (per-observable readback). This is the single reuse
+        hook the emcee sampler calls; it never touches SLHA directly.'''
+        for name, val in zip(self.free_names, theta):
+            self.points[name][modelnum] = val
+        chi2 = self._run_and_evaluate(modelnum)
+        obs = {}
+        if record_sources:
+            for rec in record_sources:
+                v = self._extract_observable(modelnum, rec['source'])
+                obs[rec['name']] = float(v) if (v is not None and not np.isnan(v)) else np.nan
+        return chi2, obs
+
     def sample_flat(self) -> None:
         '''Function for sampling parameters defined in config_dict ranges.'''
 
@@ -114,253 +181,73 @@ class ModelGenerator:
 
         return None
 
-    # ── MCMC sampling methods ──────────────────────────────────────────
-
-    def sample_mcmc(self) -> None:
-        '''Run Metropolis-Hastings MCMC sampling.
-
-        Unlike sample_flat(), this method also runs the pipeline for each proposal,
-        since the likelihood depends on computed observables. After completion,
-        self.points contains only accepted models and output files exist at indices
-        0 through num_models-1.
-
-        Diagnostics:
-            - Per-window log lines include the Metropolis acceptance rate
-              (`accept_metro`), which is what determines mixing — independent
-              of how many post-burn-in samples have been *committed*.
-            - End-of-run `[mcmc-summary]` line is emitted in a parseable format
-              for cross-chain diagnostics (split-R̂, ESS_bulk via
-              `scripts/mcmc_diagnostics.py`).
-
-        Optional adaptive proposal scaling during burn-in:
-            mcmc:
-              adapt_proposals:
-                enabled: true
-                target_acceptance: 0.25   # Roberts-Gelman-Gilks high-D optimum
-                window: 200               # proposals between adaptations
-                learning_rate: 0.05       # multiplicative step (log-scale)
-        '''
-        proposal_widths = self._build_proposal_widths()
-        burn_in = self.mcmc.get('burn_in', 0)
-        max_attempts = self.mcmc.get('max_attempts', 100000)
-        accept_invalid = self.mcmc.get('accept_invalid', False)
-        restart_after = self.mcmc.get('restart_after', None)
-        penalty = 1e6
-
-        # Adaptive proposal scaling (only during burn-in, to preserve detailed
-        # balance once we start collecting samples).
-        adapt_cfg = self.mcmc.get('adapt_proposals', {}) or {}
-        adapt_enabled = bool(adapt_cfg.get('enabled', False))
-        adapt_target = float(adapt_cfg.get('target_acceptance', 0.25))
-        adapt_window = int(adapt_cfg.get('window', 200))
-        adapt_lr = float(adapt_cfg.get('learning_rate', 0.05))
-
-        # Use num_models as a scratch file index, separate from any valid
-        # accepted index (0..num_models-1). This way every acceptance copies
-        # from scratch to the final index, and no accepted files get overwritten.
-        scratch_idx = self.num_models
-
-        # Initialize self.points large enough to index scratch_idx
-        # (run_prep_input reads self.points[key][modelnum])
-        self._init_points_arrays(scratch_idx + 1)
-
-        # Draw random initial point within parameter bounds
-        current = self._sample_initial_point()
-        for key, val in current.items():
-            self.points[key][scratch_idx] = val
-
-        # Run pipeline on initial point at scratch index
-        current_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
-
-        accepted_points = {key: [] for key in self.parameters}
-        n_accepted = 0          # committed (post-burn-in, valid) samples
-        n_total = 0              # total proposals attempted
-        n_post_burnin = 0        # proposals attempted after burn-in
-        n_burn_accepted = 0
-        n_restarts = 0
-        n_since_restart = 0
-        # New diagnostic counters: Metropolis-rule acceptance and pipeline
-        # validity. These are independent of `n_accepted` (which only counts
-        # post-burn-in valid commits), and they're what mixing actually depends on.
-        n_metro_accepted = 0     # times the MH rule fired (any phase)
-        n_pipeline_invalid = 0   # proposals where the pipeline failed
-        n_window_proposed = 0    # rolling counts for adaptive scaling
-        n_window_accepted = 0
-        past_burn_in = (burn_in == 0)
-        if not past_burn_in:
-            log.info(f"Starting MCMC burn-in ({burn_in} accepted steps)...")
-        if adapt_enabled:
-            log.info(f"Adaptive proposal scaling enabled "
-                     f"(target_acceptance={adapt_target:.2f}, "
-                     f"window={adapt_window}, learning_rate={adapt_lr:.3f})")
-
-        while n_accepted < self.num_models and n_total < max_attempts:
-            n_total += 1
-            n_since_restart += 1
-            n_window_proposed += 1
-
-            # Restart if burn-in is not converging
-            if restart_after is not None and not past_burn_in and n_since_restart >= restart_after:
-                n_restarts += 1
-                log.info(f"MCMC restart #{n_restarts} after {n_since_restart} attempts "
-                         f"({n_burn_accepted}/{burn_in} burn-in steps accepted)")
-                current = self._sample_initial_point()
-                for key, val in current.items():
-                    self.points[key][scratch_idx] = val
-                current_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
-                n_burn_accepted = 0
-                n_since_restart = 0
-                # Reset adaptation window so a freshly-restarted chain re-tunes.
-                n_window_proposed = 0
-                n_window_accepted = 0
-
-            proposed = self._propose(current, proposal_widths)
-
-            # Write proposed point into scratch arrays at scratch index
-            for key, val in proposed.items():
-                self.points[key][scratch_idx] = val
-
-            # Run pipeline at scratch index
-            proposed_chi2 = self._run_and_evaluate(modelnum=scratch_idx)
-            if proposed_chi2 >= penalty:
-                n_pipeline_invalid += 1
-
-            if self._accept_proposal(current_chi2, proposed_chi2):
-                n_metro_accepted += 1
-                n_window_accepted += 1
-                current = proposed.copy()
-                current_chi2 = proposed_chi2
-
-                # Skip saving invalid points unless accept_invalid is set
-                if not accept_invalid and current_chi2 >= penalty:
-                    pass  # state moved (detailed balance), but don't commit
-                elif past_burn_in:
-                    self._commit_accepted_model(scratch_idx, n_accepted)
-                    for key in self.parameters:
-                        accepted_points[key].append(current[key])
-                    n_accepted += 1
-                    accepted_file = f"{self.scan_dir}/input/{n_accepted - 1}.slha"
-                    log.info(f"MCMC accepted {n_accepted}/{self.num_models} "
-                             f"(attempt {n_total}, file={accepted_file}, chi2={current_chi2:.2f})")
-                else:
-                    n_burn_accepted += 1
-                    if n_burn_accepted >= burn_in:
-                        past_burn_in = True
-                        log.info(f"MCMC burn-in complete after {n_burn_accepted} accepted steps")
-
-            # Adaptive proposal scaling (burn-in only). Multiplicatively scale
-            # all widths to drive the rolling window's acceptance toward
-            # `adapt_target`. Detailed balance is preserved because adaptation
-            # stops the moment burn-in ends.
-            if (adapt_enabled and not past_burn_in
-                    and n_window_proposed >= adapt_window):
-                window_rate = n_window_accepted / n_window_proposed
-                # Avoid divide-by-zero if user sets target_acceptance=0
-                target = max(adapt_target, 1e-3)
-                # Robbins-Monro-style log-scale step toward target
-                factor = math.exp(adapt_lr * (window_rate - target) / target)
-                # Cap factor to keep adaptation gentle and avoid runaway scaling
-                factor = max(0.5, min(2.0, factor))
-                for k in proposal_widths:
-                    proposal_widths[k] *= factor
-                log.info(f"[adapt] window accept_rate={window_rate:.1%}, "
-                         f"factor={factor:.3f}; current widths={proposal_widths}")
-                n_window_proposed = 0
-                n_window_accepted = 0
-
-            # Periodic progress logging
-            if past_burn_in:
-                n_post_burnin += 1
-            if n_total % 100 == 0:
-                accept_metro = n_metro_accepted / max(n_total, 1) * 100
-                invalid_frac = n_pipeline_invalid / max(n_total, 1) * 100
-                if past_burn_in:
-                    commit_rate = (n_accepted / n_post_burnin * 100) if n_post_burnin > 0 else 0
-                    log.info(f"MCMC progress: committed={n_accepted}/{self.num_models}, "
-                             f"total={n_total}, "
-                             f"accept_metro={accept_metro:.1f}%, "
-                             f"commit_rate={commit_rate:.1f}%, "
-                             f"invalid={invalid_frac:.1f}%")
-                else:
-                    log.info(f"MCMC burn-in progress: burn_accepted={n_burn_accepted}/{burn_in}, "
-                             f"total={n_total}, "
-                             f"accept_metro={accept_metro:.1f}%, "
-                             f"invalid={invalid_frac:.1f}%")
-
-        # Clean up scratch files
-        self._cleanup_scratch_files(scratch_idx)
-
-        # Replace self.points with accepted values
-        for key in self.parameters:
-            self.points[key] = np.array(accepted_points[key])
-
-        if n_accepted < self.num_models:
-            log.warning(f"MCMC stopped at max_attempts={max_attempts} with {n_accepted} models")
-            self.num_models = n_accepted
-
-        # Parseable end-of-run summary. Each chain emits one of these — across
-        # chains, scripts/mcmc_diagnostics.py computes split-R̂ and ESS_bulk.
-        log.info(f"MCMC complete: {n_accepted} models, {n_total} proposals, "
-                 f"rate={n_accepted/max(n_total,1)*100:.1f}%")
-        log.info(
-            f"[mcmc-summary] proposed={n_total} "
-            f"metro_accepted={n_metro_accepted} "
-            f"metro_accept_rate={n_metro_accepted/max(n_total,1):.4f} "
-            f"committed={n_accepted} "
-            f"pipeline_invalid={n_pipeline_invalid} "
-            f"invalid_rate={n_pipeline_invalid/max(n_total,1):.4f} "
-            f"restarts={n_restarts} "
-            f"final_widths={proposal_widths}"
-        )
-        if n_metro_accepted / max(n_total, 1) > 0.6:
-            log.warning(
-                "[mcmc-summary] Metropolis acceptance > 60% — proposal widths "
-                "are too small. Mixing will be slow; consider widening or "
-                "enabling adapt_proposals."
-            )
-        elif n_metro_accepted / max(n_total, 1) < 0.10:
-            log.warning(
-                "[mcmc-summary] Metropolis acceptance < 10% — proposal widths "
-                "are too large. Most compute is wasted on rejections; consider "
-                "narrowing or enabling adapt_proposals."
-            )
-
-        return None
-
-    def _build_proposal_widths(self) -> dict:
-        '''Build dict of proposal widths, using configured values or 5% of range as default.'''
-        return sampling.build_proposal_widths(self.parameters, self.mcmc)
-
-    def _sample_initial_point(self) -> dict:
-        '''Sample a random starting point within all parameter bounds.'''
-        return sampling.sample_initial_point(self.parameters)
-
-    def _propose(self, current: dict, widths: dict) -> dict:
-        '''Propose a new point using Gaussian perturbation with boundary handling.'''
-        return sampling.propose(current, widths, self.parameters)
-
-    @staticmethod
-    def _reflect(value: float, low: float, high: float) -> float:
-        '''Reflect value into [low, high] interval to preserve detailed balance.'''
-        return sampling.reflect(value, low, high)
+    def _validate_observable_sources(self) -> None:
+        '''For prior: mcmc, every constraint / record_observables source.step must be a
+        step that runs (else _extract_observable returns None for every point and the
+        chain never moves), and every constraint uncertainty must be > 0.'''
+        if getattr(self, 'prior', None) != 'mcmc':
+            return
+        step_names = {s['name'] for s in self.steps}
+        srcs = [c.get('source', {}) for c in (getattr(self, 'constraints', []) or [])]
+        srcs += [r.get('source', {}) for r in ((getattr(self, 'mcmc', {}) or {}).get('record_observables', []) or [])]
+        missing = sorted({s.get('step') for s in srcs if s.get('step') and s.get('step') not in step_names})
+        if missing:
+            raise ValueError(
+                f"config references observable source step(s) {missing} not in the pipeline "
+                f"steps {sorted(step_names)}; every constraint/record_observables source.step "
+                f"must be a step that runs.")
+        for c in (getattr(self, 'constraints', []) or []):
+            # hard_window is a veto (0 inside / inf outside): it has no central value and
+            # divides by nothing, so it needs lo and/or hi instead of an uncertainty.
+            if c.get('type') == 'hard_window':
+                if c.get('lo') is None and c.get('hi') is None:
+                    raise ValueError(f"constraint '{c.get('name')}' is type hard_window but "
+                                     f"sets neither 'lo' nor 'hi'; it would veto nothing.")
+                lo, hi = c.get('lo'), c.get('hi')
+                if lo is not None and hi is not None and float(lo) >= float(hi):
+                    raise ValueError(f"constraint '{c.get('name')}' has empty hard_window "
+                                     f"lo={lo!r} >= hi={hi!r}; every point would be vetoed.")
+                continue
+            if float(c.get('uncertainty', 0)) <= 0:
+                raise ValueError(f"constraint '{c.get('name')}' has non-positive uncertainty "
+                                 f"{c.get('uncertainty')!r}; it must be > 0 (chi2 divides by it).")
+        # record_observables ntuple branch names must be unique and must not shadow the
+        # reserved emcee branches (emcee_logp / chi2); caught here so it fails at config
+        # load rather than after the whole scan, when the ntuple is written. (IN_* vs
+        # record collisions are caught in emcee_ntuple.build_ntuple_tree.)
+        reserved = {'emcee_logp', 'chi2'}
+        branches = [r.get('branch') for r in
+                    ((getattr(self, 'mcmc', {}) or {}).get('record_observables', []) or [])
+                    if r.get('branch')]
+        dupes = sorted({b for b in branches if branches.count(b) > 1})
+        clash = sorted(reserved.intersection(branches))
+        if dupes or clash:
+            raise ValueError(
+                f"invalid record_observables branch names: "
+                + (f"duplicates {dupes}; " if dupes else "")
+                + (f"reserved {clash}; " if clash else "")
+                + f"each 'branch' must be unique and not one of {sorted(reserved)}.")
 
     def _run_and_evaluate(self, modelnum: int) -> float:
-        '''Run all pipeline steps for modelnum, then compute chi2 from constraints.
-        Returns a large penalty value if the pipeline fails.'''
-        penalty = 1e6
+        '''Run the pipeline for modelnum and return chi2 from the constraints.
 
+        Returns inf when a CONSTRAINT observable cannot be evaluated ("this point failed /
+        is unusable"); a genuinely computed but very bad point keeps its large FINITE chi2
+        (the caller tells the two apart by finiteness). Steps run in order; a step whose
+        input file is absent (an upstream dependency failed) is skipped, so a failure in a
+        step NOT needed by any constraint does not veto the point.'''
         for step in self.steps:
-            success = self.run_step(modelnum=modelnum, **step)
-            if not success:
-                return penalty
+            indir = step.get('input_dir')
+            if indir and not os.path.exists(f"{self.scan_dir}/{indir}/{modelnum}.slha"):
+                continue  # an upstream step produced no output -> this one cannot run
+            self.run_step(modelnum=modelnum, **step)
 
         chi2 = 0.0
         for constraint in self.constraints:
             obs_value = self._extract_observable(modelnum, constraint['source'])
-            if obs_value is None or np.isnan(obs_value):
-                return penalty
+            if obs_value is None or not np.isfinite(obs_value):
+                return float('inf')  # a constraint observable is unavailable -> unusable point
             chi2 += self._compute_chi2_term(obs_value, constraint)
-
         return chi2
 
     def _extract_observable(self, modelnum: int, source: dict) -> float:
@@ -407,7 +294,10 @@ class ModelGenerator:
                 for col in csv_data:
                     if variable in csv_data[col]:
                         return float(csv_data[col][variable])
-                log.warning(f"Variable {variable} not found in {filepath}")
+                # Suppressed under quiet (emcee engine): invalid points fail
+                # extraction on every walker eval -> log spam.
+                if not self.quiet:
+                    log.warning(f"Variable {variable} not found in {filepath}")
                 return None
 
             else:
@@ -415,15 +305,36 @@ class ModelGenerator:
                 return None
 
         except Exception as e:
-            log.warning(f"Failed to extract observable from {source}: {e}")
+            # Suppressed under quiet (emcee engine): invalid spectra (e.g. no MASS
+            # block) fail extraction on every walker eval -> log spam.
+            if not self.quiet:
+                log.warning(f"Failed to extract observable from {source}: {e}")
             return None
 
     @staticmethod
     def _compute_chi2_term(obs_value: float, constraint: dict) -> float:
-        '''Compute chi-squared contribution from a single constraint.'''
+        '''Compute chi-squared contribution from a single constraint.
+
+        `hard_window` is a VETO, not a penalty: it contributes 0 inside the window and
+        inf outside, so _run_and_evaluate's finiteness check drops the point exactly as
+        it drops a failed pipeline step. Bounds are strict (lo < value < hi) and each is
+        optional, which expresses the three shapes a hard requirement takes: a floor
+        (`lo` only, e.g. m_h > 0 to reject SPheno's -1 sentinel), a window (`lo` + `hi`,
+        e.g. 0 < Omega < 1 for "does not overclose the universe"), and a boolean flag
+        (`lo: 0.5` on a 0/1 observable such as micromegas' cdm_is_neutralino).
+        '''
+        ctype = constraint.get('type', 'gaussian')
+
+        if ctype == 'hard_window':
+            lo, hi = constraint.get('lo'), constraint.get('hi')
+            if lo is not None and not obs_value > float(lo):
+                return float('inf')
+            if hi is not None and not obs_value < float(hi):
+                return float('inf')
+            return 0.0
+
         central = constraint['central']
         sigma = constraint['uncertainty']
-        ctype = constraint.get('type', 'gaussian')
 
         if ctype == 'gaussian':
             return ((obs_value - central) / sigma) ** 2
@@ -437,89 +348,6 @@ class ModelGenerator:
             return 0.0
         else:
             raise ValueError(f"Unknown constraint type: {ctype}")
-
-    def _accept_proposal(self, current_chi2: float, proposed_chi2: float) -> bool:
-        '''Metropolis-Hastings acceptance criterion.
-        Likelihood is proportional to exp(-chi2/2).'''
-        delta_chi2 = proposed_chi2 - current_chi2
-        if delta_chi2 <= 0:
-            return True
-        return np.random.uniform() < np.exp(-delta_chi2 / 2.0)
-
-    def _commit_accepted_model(self, scratch_idx: int, accepted_idx: int) -> None:
-        '''Copy pipeline output files from scratch index to final accepted index.'''
-        for step in self.steps:
-            if 'output_dir' not in step:
-                continue
-            odir = f"{self.scan_dir}/{step['output_dir']}"
-
-            # Determine file extension based on step type
-            if 'micromegas' in step['name']:
-                exts = ['.csv']
-            elif 'superiso' in step['name']:
-                exts = ['.flha']
-            elif 'evade' in step['name']:
-                exts = ['.tsv']
-            elif 'SModelS' in step['name']:
-                exts = ['.slha.py']
-            else:
-                exts = ['.slha']
-
-            for ext in exts:
-                src = f"{odir}/{scratch_idx}{ext}"
-                dst = f"{odir}/{accepted_idx}{ext}"
-                if os.path.exists(src):
-                    shutil.copy2(src, dst)
-
-            # Handle extra directories for micromegas raw output
-            if 'micromegas' in step['name']:
-                raw_src = f"{odir}_raw/{scratch_idx}.out"
-                raw_dst = f"{odir}_raw/{accepted_idx}.out"
-                if os.path.exists(raw_src):
-                    shutil.copy2(raw_src, raw_dst)
-
-            # Handle log files
-            if 'log_dir' in step:
-                ldir = f"{self.scan_dir}/{step['log_dir']}"
-                lsrc = f"{ldir}/{scratch_idx}.log"
-                ldst = f"{ldir}/{accepted_idx}.log"
-                if os.path.exists(lsrc):
-                    shutil.copy2(lsrc, ldst)
-
-    def _cleanup_scratch_files(self, scratch_idx: int) -> None:
-        '''Remove scratch files left over from the MCMC working index.'''
-        for step in self.steps:
-            if 'output_dir' not in step:
-                continue
-            odir = f"{self.scan_dir}/{step['output_dir']}"
-
-            if 'micromegas' in step['name']:
-                exts = ['.csv']
-            elif 'superiso' in step['name']:
-                exts = ['.flha']
-            elif 'evade' in step['name']:
-                exts = ['.tsv']
-            elif 'SModelS' in step['name']:
-                exts = ['.slha.py']
-            else:
-                exts = ['.slha']
-
-            for ext in exts:
-                f = f"{odir}/{scratch_idx}{ext}"
-                if os.path.exists(f):
-                    os.remove(f)
-
-            if 'micromegas' in step['name']:
-                f = f"{odir}_raw/{scratch_idx}.out"
-                if os.path.exists(f):
-                    os.remove(f)
-
-            if 'log_dir' in step:
-                f = f"{self.scan_dir}/{step['log_dir']}/{scratch_idx}.log"
-                if os.path.exists(f):
-                    os.remove(f)
-
-    # ── End of MCMC methods ───────────────────────────────────────────
 
     # ── Grid sampling ─────────────────────────────────────────────────
 
@@ -608,7 +436,7 @@ class ModelGenerator:
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
         logfile = f"{self.scan_dir}/{kwargs['log_dir']}/{modelnum}.log"
 
-        return toolsteps.run_SPheno(infile=infile, outfile=outfile, logfile=logfile, rawfilen=self.rawfilen)
+        return toolsteps.run_SPheno(infile=infile, outfile=outfile, logfile=logfile, rawfilen=self.rawfilen, timeout=self.tool_timeout)
 
     def run_softsusy(self, modelnum: int, **kwargs) -> bool:
         '''Run softsusy and return True if successful.'''
@@ -616,7 +444,7 @@ class ModelGenerator:
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
 
-        return toolsteps.run_softsusy(infile=infile, outfile=outfile)
+        return toolsteps.run_softsusy(infile=infile, outfile=outfile, timeout=self.tool_timeout)
 
     def run_micromegas(self, modelnum: int, **kwargs) -> bool:
         '''Run micromegas and return True if successful.'''
@@ -625,7 +453,7 @@ class ModelGenerator:
         outfile_raw = f"{self.scan_dir}/{kwargs['output_dir']}_raw/{modelnum}.out"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.csv"
 
-        return toolsteps.run_micromegas(infile=infile, outfile_raw=outfile_raw, outfile=outfile)
+        return toolsteps.run_micromegas(infile=infile, outfile_raw=outfile_raw, outfile=outfile, timeout=self.tool_timeout)
 
     def run_superiso(self, modelnum: int, **kwargs) -> bool:
         '''Run superiso and return True if successful.'''
@@ -633,7 +461,7 @@ class ModelGenerator:
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.flha"
 
-        return toolsteps.run_superiso(infile=infile, outfile=outfile)
+        return toolsteps.run_superiso(infile=infile, outfile=outfile, timeout=self.tool_timeout)
 
     def run_feynhiggs(self, modelnum: int, **kwargs) -> bool:
         '''Run FeynHiggs and return True if successful. Re-add input blocks to output file if successful.'''
@@ -642,7 +470,7 @@ class ModelGenerator:
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
         logfile = f"{self.scan_dir}/{kwargs['log_dir']}/{modelnum}.log"
 
-        return toolsteps.run_feynhiggs(infile=infile, outfile=outfile, logfile=logfile, rawfilen=self.rawfilen)
+        return toolsteps.run_feynhiggs(infile=infile, outfile=outfile, logfile=logfile, rawfilen=self.rawfilen, timeout=self.tool_timeout)
 
     def run_gm2calc(self, modelnum: int, **kwargs) -> bool:
         '''Run GM2Calc and return True if successful.'''
@@ -650,7 +478,7 @@ class ModelGenerator:
         infile = f"{self.scan_dir}/{kwargs['input_dir']}/{modelnum}.slha"
         outfile = f"{self.scan_dir}/{kwargs['output_dir']}/{modelnum}.slha"
 
-        return toolsteps.run_gm2calc(infile=infile, outfile=outfile)
+        return toolsteps.run_gm2calc(infile=infile, outfile=outfile, timeout=self.tool_timeout)
 
     def run_evade(self, modelnum: int, **kwargs) -> bool:
         '''Run EVADE and return True if successful.'''
@@ -660,7 +488,7 @@ class ModelGenerator:
         evade_conffile = f"{self.scan_dir}/{kwargs['output_dir']}_config/{modelnum}.cfg"
         evade_infile = f"{self.scan_dir}/{kwargs['output_dir']}_evade_in/{modelnum}.in"
 
-        return toolsteps.run_evade(infile=infile, outfile=outfile, evade_conffile=evade_conffile, evade_infile=evade_infile)
+        return toolsteps.run_evade(infile=infile, outfile=outfile, evade_conffile=evade_conffile, evade_infile=evade_infile, timeout=self.tool_timeout)
 
     def run_SModelS(self, modelnum: int, **kwargs) -> bool:
         '''Run SModelS and return True if successful.'''
@@ -683,7 +511,7 @@ class ModelGenerator:
         # behavior (a fresh scan overwrites the scan dir); the Snakemake rules own
         # their outputs incrementally and call _setup_scan_dirs() directly instead.
         log.info(f"Setting up output directories for scan")
-        os.system(f"rm -r {self.scan_dir} &>/dev/null")
+        pipeline.wipe_scan_dir(self.scan_dir)
         self._setup_scan_dirs()
         
         if self.prior == 'flat':
@@ -691,12 +519,12 @@ class ModelGenerator:
         elif self.prior == 'fixed':
             self.sample_fixed()
         elif self.prior == 'mcmc':
-            # MCMC runs the pipeline internally during sampling.
-            # After sample_mcmc() returns, self.points is populated with accepted models,
-            # and all output files are already written at indices 0..num_models-1.
-            self.sample_mcmc()
-            self._dump_scan_config()
-            return None
+            # prior: mcmc is the emcee sampler, which runs the pipeline inside sampling
+            # and owns its chain.h5 checkpoint/resume. It is driven by the `chain`
+            # Snakemake rule (r3mg_batch.py chain -> run_emcee_scan), NOT generate_models.
+            raise ValueError(
+                "prior: mcmc runs the emcee sampler via the 'chain' rule "
+                "(r3mg_batch.py chain), not generate_models(); use genModels.py.")
         elif self.prior == 'grid':
             self.sample_grid()
         elif self.prior == 'importance':

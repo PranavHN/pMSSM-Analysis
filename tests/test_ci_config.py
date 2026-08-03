@@ -86,17 +86,22 @@ def test_no_tools_missing_from_the_ci_image(ci):
     assert not offenders, ("tools absent from the CI image:\n" + "\n".join(offenders))
 
 
+# compare_reference-gated priors — every one of them, mcmc included. mcmc is gated on
+# branch VALUES as well as counts (compare_values in refcheck.SCANS), because an emcee
+# run at a fixed seed reproduces exactly (tests/test_emcee_determinism.py) while its
+# counts are near-vacuous: every model clears every step.
 ALL_PRIORS = ("flat", "fixed", "mcmc", "grid", "importance")
 # The docker track exists to validate the published image, not to re-prove the
 # physics: both tracks resolve from the same pixi.lock, so a representative
-# subset is enough there. The local track must keep every prior.
+# subset is enough there. flat covers the random priors; mcmc is included because the
+# chain exercises the image's emcee/h5py/arviz stack, which no other job touches.
 DOCKER_PRIORS = ("flat", "mcmc")
 
 
 @pytest.mark.parametrize("scan", ALL_PRIORS)
 def test_every_prior_is_regression_tested_locally(ci, scan):
-    '''The five local scans are the physics regression harness: each must run its
-    scan and then compare_reference.py. Losing one silently would hide drift.'''
+    '''The deterministic local scans are the physics regression harness: each must
+    run its scan and then compare_reference.py. Losing one silently would hide drift.'''
     job = f"genModels_{scan}_local"
     assert job in ci, f"{job} disappeared from CI"
     script = " ".join(ci[job]["script"])
@@ -109,6 +114,55 @@ def test_the_docker_track_validates_the_image_on_a_prior_subset(ci, scan):
     job = f"genModels_{scan}_docker"
     assert job in ci, f"{job} disappeared from CI"
     assert f"compare_reference.py --scan {scan}" in " ".join(ci[job]["script"])
+
+
+@pytest.mark.parametrize("track", ["local", "docker"])
+def test_mcmc_is_value_gated_not_just_smoke_tested(ci, track):
+    '''prior: mcmc must do a real reference comparison, not only assert that files
+    appeared. It keeps the chain-specific smoke checks (the checkpoint and the reserved
+    likelihood branches, which counts/values cannot express) AND runs
+    compare_reference.py, which for this scan compares branch values too.'''
+    job = f"genModels_mcmc_{track}"
+    assert job in ci, f"{job} disappeared from CI"
+    script = " ".join(ci[job]["script"])
+    assert "genModels.py" in script and "ci_mcmc_config.yaml" in script
+    assert "compare_reference.py --scan mcmc" in script, \
+        "mcmc must be reference-compared, not merely smoke-tested"
+    assert "chain.h5" in script, "the mcmc job must assert the emcee checkpoint was produced"
+    assert "emcee_logp" in script, "the reserved likelihood branches must still be checked"
+
+
+def test_the_value_gated_scan_relies_on_the_default_seed(ci, repo):
+    '''A value gate is only meaningful if the reference and the CI run use the same seed.
+    Neither the CI job nor make_references.py passes --seed, so both take genModels'
+    default — which therefore must not move without regenerating the references.'''
+    import re
+
+    src = (repo / "source" / "Run3ModelGen" / "scripts" / "genModels.py").read_text()
+    m = re.search(r"'--seed',\s*default=(\d+)", src)
+    assert m, "could not find genModels' --seed default"
+    assert m.group(1) == "123", (
+        "genModels' default seed changed; the mcmc value reference was built with 123, "
+        "so regenerate it (make-refs + upload-refs) or this gate fails for everyone")
+
+    for track in ("local", "docker"):
+        script = " ".join(ci[f"genModels_mcmc_{track}"]["script"])
+        assert "--seed" not in script, (
+            "the mcmc CI job must not pin --seed: make_references.py does not either, "
+            "and the two must agree")
+
+    refs = (repo / "source" / "Run3ModelGen" / "scripts" / "make_references.py").read_text()
+    assert "--seed" not in refs, "make_references.py must not pin --seed either"
+
+
+def test_mcmc_is_the_scan_that_compares_values(ci):
+    '''The value comparison is what makes gating the chain worthwhile; a plain count
+    gate on it would pass on 54/54 regardless of where the walkers went.'''
+    from Run3ModelGen.refcheck import by_name, SCANS
+    assert by_name("mcmc").get("compare_values") is True
+    others = [s["name"] for s in SCANS if s["name"] != "mcmc" and s.get("compare_values")]
+    assert not others, (f"{others} also compare values — fine in principle, but they "
+                        f"sample random points, so update this test deliberately")
 
 
 def test_publish_waits_for_every_test_job_that_exists(ci):

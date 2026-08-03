@@ -257,3 +257,43 @@ def read_manifest(path: str) -> dict:
     '''Read a per-step manifest written by :func:`write_manifest`.'''
     with open(path) as f:
         return json.load(f)
+
+
+# ── destructive-wipe guard ───────────────────────────────────────────────────
+
+# Artefacts whose loss is not recoverable by re-running the same command. An emcee
+# backend is the whole point: chain.h5 is days of sampling, and the `chain` rule is
+# built to RESUME from it (it is undeclared side-state so Snakemake never removes
+# it), so a fresh-scan wipe of a directory holding one is always a mistake. The
+# ntuple/diag are deliberately NOT listed: they are cheap to regenerate from
+# chain.h5, and a flat/grid scan legitimately overwrites its own ntuple on re-run.
+_IRREPLACEABLE = ("chain.h5",)
+
+FORCE_WIPE_ENV = "R3MG_FORCE_WIPE"
+
+
+def wipe_scan_dir(scan_dir: str, force: bool = False) -> None:
+    '''Remove a scan dir for fresh-scan semantics, refusing to destroy sampler state.
+
+    Raises RuntimeError if scan_dir holds an emcee backend (chain.h5) unless
+    ``force`` or the ``R3MG_FORCE_WIPE`` environment variable is set. Always logs
+    what it is about to delete: the wipe used to be
+    ``os.system(f"rm -r {dir} &>/dev/null")``, which discarded both the path and any
+    error, so a wipe of the wrong directory left no trace in the log.
+    '''
+    scan_dir = os.path.abspath(scan_dir)
+    if not os.path.exists(scan_dir):
+        return
+
+    protected = [n for n in _IRREPLACEABLE if os.path.exists(os.path.join(scan_dir, n))]
+    if protected and not (force or os.environ.get(FORCE_WIPE_ENV)):
+        raise RuntimeError(
+            f"refusing to wipe {scan_dir}: it holds sampler state {protected} that a "
+            f"re-run would have to recompute from scratch (an emcee chain.h5 is days of "
+            f"compute, and the chain rule resumes from it rather than restarting). "
+            f"Re-running an emcee "
+            f"scan should RESUME, not wipe. If you really mean to discard it, remove "
+            f"the directory yourself or set {FORCE_WIPE_ENV}=1.")
+
+    log.info(f"wiping scan dir {scan_dir} (fresh-scan semantics)")
+    shutil.rmtree(scan_dir, ignore_errors=True)

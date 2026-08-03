@@ -55,4 +55,5 @@ default-resources:
 
 set-threads:
   step: 4               # threads -> request_cpus; group max = legacy RequestCpus=4
-  chain: 4
+  # chain: no override -> the chain rule's own `threads` (= mcmc.nworkers; 1 for MH)
+  # drives request_cpus. A wide emcee run also needs more memory (per-run override).

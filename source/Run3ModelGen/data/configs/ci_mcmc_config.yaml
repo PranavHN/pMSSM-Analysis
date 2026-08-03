@@ -1,14 +1,27 @@
-# Lightweight MCMC config for CI testing.
-# Uses a reduced pipeline and few attempts to keep CI fast.
+# Lightweight MCMC (emcee) config for CI / local smoke testing.
+# `prior: mcmc` runs the emcee sampler. Standard pMSSM ranges (9 free params);
+# kept tiny (few steps, reduced prep_input + SPheno pipeline) so it finishes fast.
+#
+# Local smoke test:
+#   genModels.py --config_file <this file> --scan_dir /ptmp/$USER/mcmc_smoke --seed 0
 prior: mcmc
-num_models: 3
+num_models: 1
 isGMSB: False
+tool_timeout: 120
 
 mcmc:
-  burn_in: 0
-  max_attempts: 100
-  accept_invalid: true
-  proposal_widths: {}
+  nwalkers: 18             # >= 2 * ndim (9 free params)
+  nworkers: 4
+  max_steps: 4
+  burn_in: 1
+  check_every: 2
+  walltime_hours: 1
+  init:
+    strategy: spread
+  moves:
+    - {type: StretchMove, kwargs: {a: 2.0}, weight: 1.0}
+  record_observables:
+    - {name: m_h, branch: SP_m_h, source: {step: SPheno, file_type: slha, block: MASS, entry: 25}}
 
 constraints:
   - name: higgs_mass
@@ -22,25 +35,25 @@ constraints:
     uncertainty: 3.0
 
 parameters:
-  tanb: [1, 60]
+  meL: [0, 2000]
+  meR: [0, 2000]
+  mtauL: [2000, 2000]
+  mtauR: [2000, 2000]
+  mqL1: [4000, 4000]
+  muR: [4000, 4000]
+  mdR: [4000, 4000]
+  mqL3: [4000, 4000]
+  mtR: [4000, 4000]
+  mbR: [4000, 4000]
   M_1: [-2000, 2000]
   M_2: [-2000, 2000]
-  M_3: [1000, 4000]
+  mu: [-2000, 2000]
+  M_3: [4000, 4000]
   AT: [-8000, 8000]
   Ab: [-2000, 2000]
   Atau: [-2000, 2000]
-  mu: [-2000, 2000]
-  mA: [0, 2000]
-  meL: [0, 2000]
-  mtauL: [2000, 2000]
-  meR: [0, 2000]
-  mtauR: [2000, 2000]
-  mqL1: [4000, 4000]
-  mqL3: [0, 2000]
-  muR: [4000, 4000]
-  mtR: [0, 2000]
-  mdR: [4000, 4000]
-  mbR: [0, 2000]
+  mA: [2000, 2000]
+  tanb: [1, 60]
 
 steps:
   - name: prep_input
@@ -51,7 +64,3 @@ steps:
     output_dir: SPheno
     log_dir: SPheno_log
     prefix: SP
-  - name: softsusy
-    input_dir: input
-    output_dir: softsusy
-    prefix: SS

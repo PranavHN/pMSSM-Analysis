@@ -70,6 +70,11 @@ def main(step_name, scan_dir, config_file, seed, backend, log_dir, foreground):
     if recorded.get('prior') == 'mcmc':
         log.fatal("prior=mcmc scans run the pipeline inside the sampling chain and have no per-step "
                   "re-run; regenerate the whole chain with genModels.py instead.")
+        # The one thing people usually come here for is redoing the diagnostics. They are
+        # the tail of the `chain` rule rather than a step, and `diag/` is a declared rule
+        # output (invalidating it re-runs the sampler), so point at the direct command.
+        log.info(f"To redo only the emcee diagnostics of this scan (seconds; reads chain.h5 "
+                 f"read-only, re-runs no sampling):  pixi run rediagnose {scan_dir}")
         exit(1)
 
     if seed is None:

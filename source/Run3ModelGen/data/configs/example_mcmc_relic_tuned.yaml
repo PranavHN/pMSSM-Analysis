@@ -1,35 +1,25 @@
-# Tuned MCMC config for the relic-density-only scan.
+# Tuned production MCMC config: relic-density-only scan, full pipeline.
 #
-# Replaces the previous config which produced split-R̂ ≈ 38 and
-# ESS_bulk ≈ 50 across 410k samples. The proposal widths there were ~0.1 %
-# of each parameter range — chains barely moved.
+# `prior: mcmc` runs the emcee (affine-invariant ensemble) sampler
+# (ModelGenerator.run_emcee -> Run3ModelGen.emcee_sampler). emcee's stretch move
+# adapts automatically to the correlated, thin relic-density isosurface, so no
+# manual proposal-width tuning is needed (unlike the old hand-rolled sampler,
+# which reached split-R̂ ~ 38 / ESS ~ 50 over 410k samples with mis-scaled widths).
 #
-# Initial proposal widths (calibrated from a CPU smoke test where adapt
-# discovered the right scale within the first ~1000 proposals):
-#   - M_1, M_2, mu  : ~8 GeV — actual thickness of the relic-density-tight
-#                     isosurface in the LSP-mass directions for the
-#                     `relic_density.uncertainty: 0.012` chi². My earlier
-#                     "well-tempered strip" intuition (50 GeV) was 7× too
-#                     wide; adapt always converged here.
-#   - tanb          : 0.3 — weakly constraining but still tighter than I'd
-#                     guessed (was 2.0).
-#   - At            : 30 — near-nuisance for Ω, but adapt narrows even this.
-#   - Ab, Atau      : 15.
-#   - meL, meR      : 8 — slepton-coannihilation strip thickness.
+# Free parameters (9): M_1, M_2, mu, tanb, AT, Ab, Atau, meL, meR.
+# Everything else is fixed (lo == hi) and held constant.
 #
-# `adapt_proposals` is enabled: Robbins-Monro adaptation toward
-# `target_acceptance: 0.25` during burn-in. Adaptation stops at burn-in end
-# to preserve detailed balance for the post-burn-in samples.
-#
-# Burn-in dropped to 500 (was 5000) because with the tighter starting widths
-# adapt converges in ~10 windows / ~500 proposals; the rest was waste.
-#
-# After running a batch of chains, check convergence with:
-#   python source/Run3ModelGen/scripts/mcmc_diagnostics.py \
-#          --data-dir /path/to/ntuple_dir
+# Run via the standard entry point:
+#   genModels.py --config_file <this file> --scan_dir <dir> --seed <n>
+# or the SLURM array in slurm/emcee_production.sbatch (4 independent ensembles).
+# Diagnose with scripts/emcee_diagnostics.py (see doc/emcee.md).
 prior: mcmc
-num_models: 10_000
+num_models: 1          # emcee uses modelnum=0 per worker; keeps the >10000 guard happy
 isGMSB: False
+
+# Wall-clock timeout (seconds) per external physics-tool call. Guards against a
+# single hung binary stalling a whole emcee half-step over millions of evals.
+tool_timeout: 300
 
 parameters:
   AT: [-8000, 8000]
@@ -52,33 +42,48 @@ parameters:
   muR: [4000, 4000]
   tanb: [1, 60]
 
+# emcee sampler knobs (prior: mcmc).
 mcmc:
-  burn_in: 500                # adapt converges in ~10 windows; 500 is plenty
-  max_attempts: 100_000       # ~14 % effective acceptance × ~77 % valid → 10k commits ≈ 90k proposals
-  accept_invalid: false
-  restart_after: 1000         # gives burn-in 2× headroom before random restart
+  nwalkers: 256              # = 2 * nworkers: one 128-wide wave per half-step
+  nworkers: 128             # physical cores on a Viper node
+  max_steps: 100000         # iteration cap; the wall-clock guard / convergence stops earlier
+  burn_in: 300              # absolute floor (iterations) on the ntuple burn-in
+  burn_in_factor: 3         # ntuple discard = max(burn_in, ceil(burn_in_factor*max_tau)); matches emcee_diagnostics
+  check_every: 100          # autocorr / progress cadence (iterations)
+  target_autocorr_factor: 50  # require N > 50*tau for convergence
+  tau_rel_tol: 0.01         # AND tau stable to 1%
+  walltime_hours: 23        # wall-clock guard budget (matches sbatch --time)
 
-  # Starting widths calibrated against the CPU smoke test (chain shrunk these
-  # ~7× in adapt). Adapt will refine, but starting close cuts burn-in time.
-  proposal_widths:
-    M_1:    8.0
-    M_2:    8.0
-    mu:     8.0
-    tanb:   0.3
-    AT:    30.0
-    Ab:    15.0
-    Atau:  15.0
-    meL:    8.0
-    meR:    8.0
+  init:
+    strategy: spread        # uniform across the prior -> broad exploration
+    center_file: null       # CSV seed point for `ball` init (optional)
 
-  # Robbins-Monro adaptation during burn-in. Rescales every `window`
-  # proposals to drive the rolling Metropolis acceptance rate toward
-  # `target_acceptance`. Disabled automatically once burn_in is reached.
-  adapt_proposals:
-    enabled: true
-    target_acceptance: 0.25
-    window: 200
-    learning_rate: 0.05
+  # Default StretchMove(a=2.0). If the relic isosurface mixes poorly (large tau),
+  # switch to a DE-move mixture, e.g.:
+  #   - {type: DEMove, weight: 0.8}
+  #   - {type: DESnookerMove, weight: 0.2}
+  moves:
+    - {type: StretchMove, kwargs: {a: 2.0}, weight: 1.0}
+
+  # Observables recorded per sample as emcee blobs -> ntuple branches. `source`
+  # uses the same schema as `constraints`; `branch` reproduces the ntupling names.
+  record_observables:
+    - {name: Omega,      branch: MO_Omega,          source: {step: micromegas, file_type: csv,  variable: Omega}}
+    - {name: m_h,        branch: SP_m_h,            source: {step: SPheno,   file_type: slha, block: MASS, entry: 25}}
+    - {name: m_H,        branch: SP_m_H,            source: {step: SPheno,   file_type: slha, block: MASS, entry: 35}}
+    - {name: m_A,        branch: SP_m_A,            source: {step: SPheno,   file_type: slha, block: MASS, entry: 36}}
+    - {name: m_gl,       branch: SP_m_gl,           source: {step: SPheno,   file_type: slha, block: MASS, entry: 1000021}}
+    - {name: m_chi_10,   branch: SP_m_chi_10,       source: {step: SPheno,   file_type: slha, block: MASS, entry: 1000022}}
+    - {name: m_chi_20,   branch: SP_m_chi_20,       source: {step: SPheno,   file_type: slha, block: MASS, entry: 1000023}}
+    - {name: m_chi_1p,   branch: SP_m_chi_1p,       source: {step: SPheno,   file_type: slha, block: MASS, entry: 1000024}}
+    - {name: m_t_1,      branch: SP_m_t_1,          source: {step: SPheno,   file_type: slha, block: MASS, entry: 1000006}}
+    - {name: m_b_1,      branch: SP_m_b_1,          source: {step: SPheno,   file_type: slha, block: MASS, entry: 1000005}}
+    - {name: m_tau_1,    branch: SP_m_tau_1,        source: {step: SPheno,   file_type: slha, block: MASS, entry: 1000015}}
+    - {name: m_e_L,      branch: SP_m_e_L,          source: {step: SPheno,   file_type: slha, block: MASS, entry: 1000011}}
+    - {name: BR_bsg,     branch: SI_BR_b_to_sgamma, source: {step: superiso, file_type: flha, block: FOBS, entry: [5, 1]}}
+    - {name: BR_bsmumu,  branch: SI_BR_Bs_to_mumu,  source: {step: superiso, file_type: flha, block: FOBS, entry: [531, 1]}}
+    - {name: a_mu,       branch: GM2_gmuon,         source: {step: gm2calc,  file_type: slha, block: GM2CALCOUTPUT, entry: 0}}
+    - {name: FH_m_h,     branch: FH_m_h,            source: {step: feynhiggs, file_type: slha, block: MASS, entry: 25}}
 
 constraints:
   - name: relic_density
