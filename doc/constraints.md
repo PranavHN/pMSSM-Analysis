@@ -1,6 +1,6 @@
 # Constraints
 
-Constraints define how physics observables are compared to experimental measurements. They are used by [MCMC sampling](mcmc.md) to compute a chi-squared (chi2) value for each model, which drives the Metropolis-Hastings acceptance criterion.
+Constraints define how physics observables are compared to experimental measurements. They are used by [MCMC sampling](emcee.md) to compute a chi-squared (chi2) value for each model, which drives the emcee log-probability.
 
 ## Configuration
 
@@ -120,7 +120,7 @@ The total chi2 for a model is the sum of all individual constraint contributions
 chi2_total = sum(chi2_i for each constraint i)
 ```
 
-The Metropolis-Hastings likelihood is then `L = exp(-chi2_total / 2)`.
+The likelihood is then `L = exp(-chi2_total / 2)`, and the emcee log-probability sampled by `prior: mcmc` is `-chi2_total / 2 + flat_prior` (out-of-bounds or pipeline-failed points return `-inf`).
 
 ## Common constraint examples
 

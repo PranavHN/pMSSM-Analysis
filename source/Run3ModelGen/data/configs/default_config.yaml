@@ -56,9 +56,16 @@ steps:
     output_dir: SModelS
     prefix: SModelS
 mcmc:
-  proposal_widths: {}
+  # prior: mcmc runs the emcee affine-invariant ensemble sampler (see doc/emcee.md).
+  # These are defaults; a real mcmc scan overrides them and adds constraints +
+  # record_observables (the flat default prior does not use this block).
+  nworkers: 8
+  max_steps: 10000
   burn_in: 0
-  max_attempts: 10000
-  accept_invalid: false
-  restart_after: null
+  burn_in_factor: 3
+  check_every: 100
+  target_autocorr_factor: 50
+  tau_rel_tol: 0.01
+  init:
+    strategy: spread
 constraints: []

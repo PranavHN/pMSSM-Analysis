@@ -155,7 +155,7 @@ def test_importance_requires_a_block():
         sampling.sample_importance(PARAMS, {})
 
 
-# ── proposal helpers (shared with the MH chain) ────────────────────────────
+# ── proposal helpers (used by importance sampling) ─────────────────────────
 
 def test_default_proposal_width_is_five_percent_of_the_range():
     widths = sampling.build_proposal_widths({"x": [0, 100]}, {})

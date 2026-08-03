@@ -58,8 +58,12 @@ set-resources:
     # shrink the batch job to a single CPU and re-serialise the steps. Ask explicitly.
     cpus_per_task: 4
   chain:
-    runtime: 1380       # a full MH chain is one long sequential job (23h)
-    mem_mb: 8000
+    runtime: 1380       # a full chain is one long sequential job (23h)
+    # 8 GB was fine for the 1-worker MH chain, but a wide emcee run (nworkers=128)
+    # peaked at ~9 GB (relic_demove_v2, measured), so 8 GB risks an OOM on the
+    # facade path. 16 GB gives headroom; raise further (or --set-resources
+    # chain:mem_mb=0 for a whole node) for wider runs.
+    mem_mb: 16000
 
 set-threads:
   step: 1               # each step is a SINGLE-threaded loop over models, so claiming
@@ -69,4 +73,6 @@ set-threads:
                         # micromegas/superiso/gm2calc/feynhiggs/SModelS all gate on
                         # SPheno, so the cheap four hide inside SModelS' runtime
                         # (~11h serial -> ~9.5h, SModelS-bound).
-  chain: 4
+  # chain: no set-threads override -> the chain rule's own `threads` (= mcmc.nworkers
+  # from the config; 1 for MH) drives cpus-per-task. For a wide emcee production run
+  # (nworkers=128) also raise memory, e.g. --set-resources chain:mem_mb=0 (whole node).

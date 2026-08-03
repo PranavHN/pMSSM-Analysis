@@ -62,8 +62,9 @@ variables:
     - pixi run bash source/Run3ModelGen/scripts/setup_pythia8.sh || echo "[ci] pythia8 setup warning; the SModelS step may fail"
     - mkdir -p run
 
-# genModels jobs additionally kinit so they can xrdcp the reference ntuple counts
-# from EOS for the per-step regression check (compare_reference.py). `extends`
+# genModels jobs additionally kinit so they can xrdcp their reference from EOS for
+# compare_reference.py -- the per-step counts sidecar for every scan, plus the
+# reference ntuple itself for the value-gated ones (mcmc). `extends`
 # REPLACES before_script, so re-reference the base setup and append the kinit line.
 # SERVICE_PASS (base64 of the nicebot password) and CERN_USER (=nicebot) are masked
 # CI variables. (extractModels/publish don't read EOS, so they keep the base setup.)
@@ -187,7 +188,13 @@ genModels_mcmc_local:
   needs: [build_local, workflow_dryrun_local]
   script:
     - cd run
+    # emcee is bit-reproducible at a fixed seed, so this is gated on the chain's VALUES
+    # (compare_values in refcheck.SCANS), not only on per-step counts -- every model
+    # here clears both steps, so counts alone would assert little.
     - genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml --scan_dir scan_mcmc
+    - test -s scan_mcmc/chain.h5 && test -s scan_mcmc/ntuple.0.0.root
+    # the emcee ntuple must carry the reserved likelihood branches + at least one IN_ input
+    - python3 -c "import uproot; b=set(uproot.open('scan_mcmc/ntuple.0.0.root')['susy'].keys()); assert {'emcee_logp','chi2'}<=b and any(k.startswith('IN_') for k in b), sorted(b)"
     - compare_reference.py --scan mcmc
   artifacts:
     paths:
@@ -201,7 +208,13 @@ genModels_mcmc_docker:
   image: ${CI_IMAGE}
   script:
     - cd run
+    # emcee is bit-reproducible at a fixed seed, so this is gated on the chain's VALUES
+    # (compare_values in refcheck.SCANS), not only on per-step counts -- every model
+    # here clears both steps, so counts alone would assert little.
     - pixi run genModels.py --config_file ../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml --scan_dir scan_mcmc
+    - test -s scan_mcmc/chain.h5 && test -s scan_mcmc/ntuple.0.0.root
+    # the emcee ntuple must carry the reserved likelihood branches + at least one IN_ input
+    - pixi run python3 -c "import uproot; b=set(uproot.open('scan_mcmc/ntuple.0.0.root')['susy'].keys()); assert {'emcee_logp','chi2'}<=b and any(k.startswith('IN_') for k in b), sorted(b)"
     - pixi run compare_reference.py --scan mcmc
   artifacts:
     paths:
@@ -348,8 +361,9 @@ publish_docker:
       artifacts: true
     # Docker tests: flat + mcmc only — they validate the image (baked pythia8 /
     # SModelS caches, entrypoint) that gets published here. All five priors are
-    # regression-tested against the references in the local track, which resolves
-    # from the same pixi.lock, so running every prior twice buys little.
+    # reference-gated in the local track, which resolves from the same pixi.lock, so
+    # running every prior twice buys little -- mcmc is the exception worth doubling up
+    # on, since only the chain exercises the image's emcee/h5py/arviz stack.
     - job: genModels_flat_docker
       artifacts: false
     - job: genModels_mcmc_docker

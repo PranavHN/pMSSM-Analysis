@@ -28,7 +28,18 @@ SEED_CSV = "../source/Run3ModelGen/data/configs/ci_importance_seeds.csv"
 SCANS = [
     {"name": "flat",       "config": None,                                                            "scan_dir": "scan_flat",       "needs_seed_csv": False},
     {"name": "fixed",      "config": "../source/Run3ModelGen/data/configs/example_fixed_config.yaml", "scan_dir": "scan_fixed",      "needs_seed_csv": False},
-    {"name": "mcmc",       "config": "../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml",       "scan_dir": "scan_mcmc",       "needs_seed_csv": False},
+    # mcmc (emcee) is regression-tested on VALUES, not just counts (compare_values).
+    # A fixed --seed reproduces the chain exactly -- see seed_sampler_rng in
+    # emcee_sampler.py, pinned by tests/test_emcee_determinism.py, and invariant to
+    # mcmc.nworkers because every proposal is drawn in the parent and pool.map preserves
+    # order. Counts alone would be near-vacuous here (every model clears both steps,
+    # 54/54, so they assert little beyond "did not crash"), which is exactly why this
+    # scan also runs compare_ntuples: the chain trajectory is the regression signal.
+    # The one failure mode a value gate inherits is the sampling loop's wall-clock
+    # guard, which would checkpoint a SHORTER chain -- compare_ntuples reports that as a
+    # truncation by name rather than as a value drift. The CI chain takes ~8 s against a
+    # 1 h budget, so the margin is ~400x.
+    {"name": "mcmc",       "config": "../source/Run3ModelGen/data/configs/ci_mcmc_config.yaml",       "scan_dir": "scan_mcmc",       "needs_seed_csv": False, "compare_values": True},
     {"name": "grid",       "config": "../source/Run3ModelGen/data/configs/ci_grid_config.yaml",       "scan_dir": "scan_grid",       "needs_seed_csv": False},
     {"name": "importance", "config": "../source/Run3ModelGen/data/configs/ci_importance_config.yaml", "scan_dir": "scan_importance", "needs_seed_csv": True},
 ]
@@ -106,6 +117,82 @@ def per_step_counts(scan_dir):
             counts[step] = (int((arrs[branch] != -1).sum()), total)
 
     return counts
+
+
+# Relative tolerance for the branch-value comparison. The chain coordinates are pure
+# float64 numpy arithmetic and the physics branches are parsed from SLHA text (fixed
+# printed precision), so in practice the values reproduce exactly -- verified across two
+# very different machines: a viper EL9 login node and the EL10 CI runner produced the
+# same walker-init reject count and the same acceptance fraction to three decimals at
+# seed 123. But "exact" has never been demonstrated bit-for-bit on a runner, and a
+# last-ulp difference in one SPheno build would make an exact gate fail for no real
+# reason. 1e-12 is ~4 orders tighter than any physically meaningful drift while
+# absorbing that.
+VALUE_RTOL = 1e-12
+
+
+def compare_ntuples(ref_path, produced_path, rtol=VALUE_RTOL, tree="susy"):
+    '''Compare two ntuples branch by branch.
+
+    A far stronger check than :func:`compare_counts`, which only asks how many models
+    cleared each step: this pins the VALUES. It is what makes a reference comparison
+    worthwhile for an MCMC scan, where every model passes every step and the counts are
+    therefore near-vacuous.
+
+    NB an MCMC chain amplifies numeric differences rather than averaging them out: a
+    borderline accept/reject that flips sends the trajectory somewhere else entirely, so
+    a genuine regression shows up as a wholesale mismatch, not a small drift.
+
+    :returns: ``(ok, table_str)``. ``ok`` is False on any differing entry count,
+        branch-set difference, or value mismatch. NaN compares equal to NaN (the
+        ntuple's "not filled" values are real data here, not noise).
+    '''
+    import numpy as np
+    import uproot  # lazy: keeps importing this module cheap/side-effect free
+
+    rows, ok = [], True
+    with uproot.open(f"{ref_path}:{tree}") as rt, uproot.open(f"{produced_path}:{tree}") as pt:
+        n_ref, n_prod = int(rt.num_entries), int(pt.num_entries)
+        rows.append(f"    entries: reference {n_ref}, produced {n_prod}"
+                    f"{'' if n_ref == n_prod else '   <- DIFFER'}")
+        if n_ref != n_prod:
+            # For a chain this is the signature of a truncated run: the wall-clock guard
+            # checkpointed early, so there are fewer post-burn-in iterations.
+            ok = False
+            rows.append("    a chain with fewer entries than the reference was TRUNCATED "
+                        "(wall-clock guard) rather than changed")
+
+        kr, kp = set(rt.keys()), set(pt.keys())
+        for missing in sorted(kr - kp):
+            ok = False
+            rows.append(f"    {missing:<24} MISSING from produced")
+        for extra in sorted(kp - kr):
+            ok = False
+            rows.append(f"    {extra:<24} NOT IN reference")
+
+        shared = sorted(kr & kp)
+        if shared and n_ref == n_prod:
+            ra = rt.arrays(shared, library="np")
+            pa = pt.arrays(shared, library="np")
+            worst = []
+            for br in shared:
+                a, b = ra[br], pa[br]
+                same = np.isclose(a, b, rtol=rtol, atol=0.0, equal_nan=True)
+                n_diff = int((~same).sum())
+                if n_diff:
+                    ok = False
+                    with np.errstate(invalid='ignore', divide='ignore'):
+                        rel = np.abs(a - b) / np.where(b == 0, np.nan, np.abs(b))
+                    worst.append((br, n_diff, float(np.nanmax(np.abs(a - b))),
+                                  float(np.nanmax(rel)) if np.any(np.isfinite(rel)) else float('nan')))
+            if worst:
+                rows.append(f"    {'branch':<24} {'n_diff':>7} {'max|dev|':>12} {'max_rel':>10}")
+                for br, n, ad, rd in worst:
+                    rows.append(f"    {br:<24} {n:>7} {ad:>12.4g} {rd:>10.2e}")
+            else:
+                rows.append(f"    all {len(shared)} branches match "
+                            f"(rtol={rtol:g}) across {n_prod} entries")
+    return ok, "\n".join(rows)
 
 
 def format_counts_table(counts, title=None):

@@ -18,12 +18,11 @@ platforms = ["linux-64", "osx-64"]
 # automatically as part of the CMake build (see source/CMakeLists.txt setup_pythia8).
 setup-pythia8 = "bash source/Run3ModelGen/scripts/setup_pythia8.sh"
 
-# The dagviz install comes first and is deliberately non-fatal: it only provides
-# the graphviz `dot` that renders each run's DAG snapshot as SVG (the .dot source
-# is always written without it), so no network hiccup may fail the actual build.
-# Keeping the cmake chain last also keeps the task's exit code the build's own.
+# Build only — environments are installed beforehand by `pixi install -a`
+# (see the README): a `pixi install` cannot run from inside a `pixi run` task,
+# and the [target.linux-64.tasks] override below replaces this definition
+# wholesale, so an install step here would silently not run on Linux anyway.
 build = """
-pixi install -e dagviz || echo "[build] dagviz env unavailable - runs will save dag.dot but no dag.svg"
 cmake -S source -B build && \
 cmake \
     --build build \
@@ -98,8 +97,37 @@ bash -c '\
 upload_references.py'
 """
 
+# emcee MCMC diagnostics (prior: mcmc): reads chain.h5 + its
+# .meta.json sidecar and writes R-hat/ESS/tau + corner/logprob/trace plots
+# (optionally --to-ntuple). Args pass through, e.g.:
+#   pixi run emcee_diagnostics --glob "/ptmp/$USER/emcee/<label>/ens_*/scan/chain.h5" --outdir results/<label>/diag
+emcee_diagnostics = """
+bash -c '\
+. build/setup.sh && \
+emcee_diagnostics.py "$@"' --
+"""
+
+# Redo ONLY the diagnostics of an existing scan dir, in place:
+#   pixi run rediagnose run/test_1d [extra emcee_diagnostics args]
+# Same invocation the chain rule makes as its final step (r3mg_batch.py chain), so the
+# result is what that run would have written -- it just re-reads chain.h5 (read-only)
+# instead of sampling. rerunStep.py cannot do this: the diagnostics are the tail of the
+# `chain` rule, not a pipeline step, and `diag/` is a declared rule output, so
+# invalidating it through Snakemake would re-run the sampler. For the cross-ensemble
+# R-hat over several seeds, call emcee_diagnostics with --glob across the scan dirs.
+rediagnose = """
+bash -c '\
+. build/setup.sh || exit 1; \
+d="${1:-}"; \
+if [ -z "$d" ]; then echo "usage: pixi run rediagnose <scan_dir> [extra emcee_diagnostics args]" >&2; exit 1; fi; \
+shift; \
+if [ ! -f "$d/chain.h5" ]; then echo "no $d/chain.h5 - not an emcee (prior: mcmc) scan dir" >&2; exit 1; fi; \
+exec emcee_diagnostics.py --glob "$d/chain.h5" --outdir "$d/diag" "$@"' --
+"""
+
 [target.linux-64.tasks]
-# Use nproc as available
+# Use nproc as available. Note this replaces the [tasks] `build` above entirely
+# on linux-64 (pixi does not merge the two), so any change there needs mirroring.
 build = """
 cmake -S source -B build && \
 cmake \
@@ -141,6 +169,13 @@ xrootd = ">=5.6,<7"  # provides the xrdcp client for uploading/downloading EOS r
 numpy = "2.4.6.*"
 snakemake-minimal = ">=9,<10"  # bioconda; workflow engine (see workflow/)
 pytest = ">=8,<9"  # unit tests for the pure layer (see tests/)
+# emcee sampler (prior: mcmc) + its diagnostics. Ported from the
+# mcmc branch onto the chain-rule seam; must not perturb the numpy 2.4.6 pin above.
+emcee = ">=3.1.4,<4"  # affine-invariant ensemble MCMC sampler
+h5py = ">=3.10,<4"    # emcee HDFBackend: chain checkpointing + cross-job resume
+arviz = ">=0.18,<1"   # MCMC diagnostics: R-hat, ESS (emcee_diagnostics.py)
+corner = ">=2.2,<3"   # corner/posterior plots for emcee_diagnostics.py
+matplotlib-base = ">=3.8,<4"  # diagnostics plotting (headless: MPLBACKEND=Agg); -base avoids Qt
 
 [target.linux-64.dependencies]
 gcc = ">=13.2.0,<13.3"

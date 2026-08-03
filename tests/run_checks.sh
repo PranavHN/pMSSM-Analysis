@@ -84,7 +84,7 @@ if grep -q 'run/r3mg/scan\.1\.[01]/points\.npz' "$dry"; then
     echo "FAIL: a manifest left on shared storage outlives its scan dir"; exit 1
 fi
 
-echo "== workflow DAG: mcmc chain =="
+echo "== workflow DAG: mcmc chain (emcee) =="
 "${SMK[@]}" --config mode=single scan_dir=run/dryrun_mcmc config_file="$CFGD/ci_mcmc_config.yaml"
 
 echo "== workflow DAG: extraction fan-out =="

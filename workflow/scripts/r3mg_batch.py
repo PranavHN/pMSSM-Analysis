@@ -24,6 +24,15 @@ import subprocess
 import sys
 import tempfile
 
+# Pin BLAS/OpenMP to one thread BEFORE numpy is imported here, so the emcee worker
+# Pool (one process per core) does not oversubscribe via nested BLAS
+# threads. genModels.py is now a thin Snakemake facade that never imports numpy/forks,
+# so the pin must live in this process (where the pipeline imports numpy). setdefault
+# lets an explicit sbatch/profile export win.
+for _blas_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                  "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_blas_var, "1")
+
 import click
 import numpy as np
 
@@ -94,8 +103,9 @@ def sample(config_file, scan_dir, seed, points_out):
     '''
     mg = _load_generator(config_file, scan_dir, seed)
 
-    # Fresh scan dir (mirrors generate_models' legacy wipe)
-    os.system(f"rm -r {mg.scan_dir} &>/dev/null")
+    # Fresh scan dir (mirrors generate_models' legacy wipe). Guarded: refuses to
+    # destroy an emcee chain.h5 (see pipeline.wipe_scan_dir) and logs the path.
+    pipeline.wipe_scan_dir(mg.scan_dir)
     mg._setup_scan_dirs()
 
     if mg.prior == 'flat':
@@ -248,32 +258,72 @@ def ntuple(config_file, scan_dir, points_file, meta_dir):
 @click.option('--scan_dir', required=True, type=str)
 @click.option('--seed', required=True, type=int)
 @click.option('--manifest_out', required=True, type=str)
-def chain(config_file, scan_dir, seed, manifest_out):
-    '''Run one sequential chain scan (prior: mcmc) as a single opaque job.
+@click.option('--nworkers', default=None, type=int,
+              help='emcee worker-pool size (defaults to the mcmc.nworkers config).')
+def chain(config_file, scan_dir, seed, manifest_out, nworkers):
+    '''Run one MCMC chain scan (prior: mcmc) as a single opaque job.
 
-    The MH chain runs the whole pipeline inside sampling and owns its scan dir
-    (including the legacy wipe-on-start). This is also the seam where the
-    emcee engine plugs in later: same rule shape, engine dispatch here.
+    prior: mcmc runs the emcee affine-invariant ensemble sampler
+    (Run3ModelGen.emcee_sampler): the whole pipeline runs inside sampling (so it
+    can't be decomposed into per-tool rules), checkpointing to <scan_dir>/chain.h5
+    and auto-resuming. The chain owns its scan dir but deliberately does NOT wipe
+    it, so re-running the rule resumes the chain (chain.h5 is undeclared side-state;
+    see chain.smk).
     '''
     scan_dir = os.path.abspath(scan_dir)
     manifest_out = os.path.abspath(manifest_out)
     if config_file:
         config_file = os.path.abspath(config_file)
 
-    # Private cwd for tool scratch (see step()).
+    # Private cwd for tool scratch (see step()); removed in the finally so repeated
+    # resume runs of the chain rule don't leak a tempdir per invocation.
+    orig_cwd = os.getcwd()
     workdir = tempfile.mkdtemp(prefix="r3mg_chain_")
     os.chdir(workdir)
+    try:
+        mg = _load_generator(config_file, scan_dir, seed)
+        if mg.prior != 'mcmc':
+            raise click.ClickException(f"chain rule invoked with prior '{mg.prior}'")
 
-    mg = _load_generator(config_file, scan_dir, seed)
-    if mg.prior != 'mcmc':
-        raise click.ClickException(f"chain rule invoked with prior '{mg.prior}'")
-    mg.generate_models()
-    mg.mkntuple()
+        from Run3ModelGen.emcee_sampler import run_emcee_scan
+        ecfg = getattr(mg, 'mcmc', {}) or {}
+        mg._setup_scan_dirs()                 # non-destructive setup (no wipe -> resume-safe)
+        backend_path = os.path.join(scan_dir, 'chain.h5')
+        summary = run_emcee_scan(
+            config_file=config_file, scan_dir=scan_dir, backend_path=backend_path,
+            seed=seed, nworkers=nworkers,
+            max_hours=(ecfg.get('walltime_hours') or 23.0),
+            resume=os.path.exists(backend_path),
+            to_ntuple=pipeline.ntuple_name(scan_dir),
+            worker_base=workdir)
+        mg._dump_scan_config()
+        manifest = {"engine": "emcee", "seed": seed,
+                    "iterations": summary.get("iterations"),
+                    "n_samples": summary.get("n_samples"),
+                    "converged": summary.get("converged"),
+                    "mean_acceptance": summary.get("mean_acceptance"),
+                    "max_tau": summary.get("max_tau"),
+                    "scheduler": pipeline.scheduler_identity()}
 
-    os.makedirs(os.path.dirname(manifest_out), exist_ok=True)
-    with open(manifest_out, "w") as f:
-        json.dump({"engine": "mh", "num_models": int(mg.num_models), "seed": seed,
-                   "scheduler": pipeline.scheduler_identity()}, f, indent=1)
+        os.makedirs(os.path.dirname(manifest_out), exist_ok=True)
+        with open(manifest_out, "w") as f:
+            json.dump(manifest, f, indent=1)
+
+        # Final step: emcee diagnostics -> <scan_dir>/diag (a declared directory output of
+        # the chain rule). Best-effort — a plotting/arviz hiccup must NOT fail a completed
+        # chain — but the dir is always created so the declared output exists.
+        diag_dir = os.path.join(scan_dir, 'diag')
+        os.makedirs(diag_dir, exist_ok=True)
+        try:
+            rc = subprocess.run(['emcee_diagnostics.py', '--glob', backend_path,
+                                 '--outdir', diag_dir]).returncode
+            if rc != 0:
+                log.warning(f"emcee diagnostics exited {rc} (non-fatal); partial output in {diag_dir}")
+        except Exception as e:
+            log.warning(f"emcee diagnostics failed (non-fatal): {e!r}")
+    finally:
+        os.chdir(orig_cwd)
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 @cli.command()

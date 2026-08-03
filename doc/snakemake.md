@@ -120,11 +120,11 @@ sample  →  prep_input → SPheno → softsusy → micromegas → superiso
   a model that fails softsusy is also skipped for micromegas, exactly like the
   legacy in-process loop — this keeps the per-step success counts compared by the
   CI reference check byte-identical.
-- `prior: mcmc` instead runs as **one opaque `chain` rule per batch** (the
-  Metropolis-Hastings chain runs the whole pipeline inside sampling and cannot be
-  decomposed). This rule is also the seam where the emcee sampler from the `mcmc`
-  branch will plug in (engine dispatch inside `r3mg_batch.py chain`, plus
-  `chain.h5` resume state).
+- `prior: mcmc` instead runs as **one opaque `chain` rule per batch**: the emcee
+  affine-invariant ensemble sampler runs the whole pipeline inside sampling, so it
+  cannot be decomposed into per-tool rules. The chain checkpoints to `chain.h5`
+  (undeclared side-state), so a re-run resumes an unconverged chain rather than
+  wiping it — see [doc/emcee.md](emcee.md).
 
 Rule bodies live in `workflow/scripts/r3mg_batch.py` (internal CLI:
 `sample|step|ntuple|chain|tarball|publish`; invoked by path from the rules, never
@@ -290,8 +290,8 @@ also kept next to the bookkeeping (`r3mg/<scan>/dag.*` in single mode,
 extraction), which survives even if the run dies mid-way (scan dirs are wiped
 at the start of a fresh run, so they only get the copy at the end). The `.dot`
 source is always written; the `.svg` additionally requires a graphviz `dot`
-binary (PATH or the installed `dagviz` pixi env, which `pixi run build`
-installs — standalone: `pixi install -e dagviz`). `dag.*` is excluded from published tarballs (legacy member layout);
+binary (PATH or the installed `dagviz` pixi env — `pixi install -a`, or
+`pixi install -e dagviz` on its own). `dag.*` is excluded from published tarballs (legacy member layout);
 snapshot failures never fail the run.
 
 graphviz lives in its own pixi environment (`dagviz`) — pulling it into the

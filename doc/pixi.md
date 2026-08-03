@@ -7,13 +7,14 @@ This document describes how Run3ModelGen uses [pixi](https://pixi.sh/) to manage
 | Action | Command |
 | --- | --- |
 | Install pixi | `curl -fsSL https://pixi.sh/install.sh \| bash` |
+| Install all environments | `pixi install -a` (first thing after cloning) |
 | Enter the default shell | `pixi shell` |
-| Build the project | `pixi run build` |
+| Build the project | `pixi run build` (after `pixi install -a`) |
 | Generate models | `pixi run genModels` |
 | Drive snakemake directly | `pixi run smk <snakemake args>` |
 | Clean build & run dirs | `pixi run clean` |
 | Enter the ROOT environment | `pixi shell -e rootenv` |
-| Install the DAG-rendering env | `pixi install -e dagviz` (also done by `pixi run build`) |
+| Install the DAG-rendering env only | `pixi install -e dagviz` |
 | Add a dependency | `pixi add <package>` |
 | List installed packages | `pixi list` |
 
@@ -47,11 +48,17 @@ Run3ModelGen defines three pixi environments:
 The default environment contains everything needed to build and run the full physics pipeline: Python 3.11, Fortran and C++ compilers, cmake, all Python dependencies (pyslha, uproot, scipy, click, structlog, etc.), and the external physics libraries.
 
 ```bash
+pixi install -a     # Install every environment (once per checkout)
 pixi shell          # Enter the default environment
 pixi run build      # Build without entering a shell
 ```
 
 This is the environment you use for day-to-day development and model generation.
+
+Installing and building are two commands, not one: a `pixi install` cannot run
+from inside a `pixi run` task, so the `build` task builds and nothing else. Plain
+`pixi install` (default environment only) is enough to build and run scans;
+`-a` adds `rootenv` and `dagviz`.
 
 ### `rootenv` environment
 
@@ -99,8 +106,9 @@ libxml2, libllvm19 and zeromq), and 40 added packages (gtk3, cairo, pango,
 gdk-pixbuf, libcups). xrootd is what `--publish` uses to reach EOS, so that
 trade is not worth a rendered graph.
 
-`pixi run build` installs this environment as part of a normal build; the
-standalone command is `pixi install -e dagviz` (once per machine/checkout).
+`pixi install -a` installs it with everything else; on its own it is
+`pixi install -e dagviz` (once per machine/checkout). Without it, runs still
+write `dag.dot` and simply skip the SVG.
 
 For more on pixi multi-environment support, see the [pixi environments documentation](https://pixi.sh/latest/features/multi-environment/).
 
@@ -112,7 +120,7 @@ pixi tasks provide reproducible, single-command workflows. They are defined in `
 
 | Task | Command | Description |
 | --- | --- | --- |
-| `build` | `pixi run build` | Configures and compiles the project with cmake. On Linux, uses all available cores minus one. |
+| `build` | `pixi run build` | Configures and compiles the project with cmake. On Linux, uses all available cores minus one. Assumes the environments are already installed (`pixi install -a`). |
 | `genModels` | `pixi run genModels` | Sources the build environment, creates a `run/` directory, and runs `genModels.py`. |
 | `extractModels` | `pixi run extractModels` | Sources the build environment and runs `extractModels.py` with default arguments. |
 | `smk` | `pixi run smk <args>` | Direct snakemake access for power users: sources the build environment, runs from `run/`, passes all arguments through to `snakemake -s ../workflow/Snakefile` (see [snakemake.md](snakemake.md)). |
@@ -121,6 +129,7 @@ pixi tasks provide reproducible, single-command workflows. They are defined in `
 | `genModels-clean` | `pixi run genModels-clean` | Runs `clean`, `build`, and `genModels` in sequence (full rebuild + generate). |
 | `make-refs` | `pixi run make-refs` | Produces the CI reference scans and prints their per-step success counts (manual, no upload). |
 | `upload-refs` | `pixi run upload-refs` | Uploads the references produced by `make-refs` to the shared EOS area (manual, needs credentials — see the README). |
+| `rediagnose` | `pixi run rediagnose <scan_dir>` | Re-runs *only* the emcee diagnostics of an existing `prior: mcmc` scan into `<scan_dir>/diag`, with the same call the `chain` rule makes (seconds; reads `chain.h5` read-only). Extra args pass through to `emcee_diagnostics`. See [emcee.md](emcee.md#re-running-only-the-diagnostics). |
 | `setup-pythia8` | `pixi run setup-pythia8` | Repairs/builds SModelS's bundled pythia8 (see [pythia8.md](pythia8.md)). Normally runs automatically during the build and on `source build/setup.sh`. |
 
 ### Platform-specific overrides
@@ -139,6 +148,11 @@ cmake \
 ```
 
 On other platforms, the generic `[tasks]` definition is used with a fixed parallelism of 8.
+
+The override **replaces** the `[tasks]` definition on linux-64 rather than
+extending it — pixi does not merge the two. Anything added to the generic `build`
+task must be mirrored into the linux-64 one, or it will silently not run on Linux
+(which is every machine this project is used on).
 
 ### Running tasks
 
@@ -269,7 +283,7 @@ If the environment becomes corrupted or you want a clean start:
 
 ```bash
 rm -rf .pixi
-pixi install
+pixi install -a
 ```
 
 ## Troubleshooting

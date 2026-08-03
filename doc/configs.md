@@ -15,8 +15,8 @@ All scan parameters are controlled via YAML config files. When `genModels.py` is
 | `isGMSB` | bool | `False` | Enable GMSB-specific parameter handling. |
 | `parameters` | dict | See default | pMSSM parameter ranges (flat/mcmc) or fixed values (fixed). |
 | `steps` | list | See default | Pipeline steps to run, in order. |
-| `mcmc` | dict | See default | MCMC-specific settings. Only used when `prior: mcmc`. See [doc/mcmc.md](mcmc.md). |
-| `constraints` | list | `[]` | Physics constraints for MCMC likelihood. See [doc/constraints.md](constraints.md). |
+| `mcmc` | dict | See default | emcee sampler knobs. Only used when `prior: mcmc`. See [doc/emcee.md](emcee.md). |
+| `constraints` | list | `[]` | Physics constraints for the MCMC likelihood. See [doc/constraints.md](constraints.md). |
 | `grid` | dict | `{}` | Grid axis definitions. Only used when `prior: grid`. Maps parameter names to lists of values. |
 | `importance` | dict | `{}` | Importance sampling settings. Only used when `prior: importance`. See [Importance](#importance) section. |
 
@@ -115,15 +115,23 @@ parameters:
 
 ### MCMC
 
-Uses Metropolis-Hastings sampling guided by physics constraints. The pipeline runs for each proposal during sampling. Requires an `mcmc` block and a `constraints` list. See [doc/mcmc.md](mcmc.md) for full details.
+Runs the emcee affine-invariant ensemble sampler guided by physics constraints. The whole pipeline runs inside sampling (unlike the point-sampled priors, which run it once after sampling). Requires an `mcmc` block and a `constraints` list. emcee's stretch move adapts to the target automatically, so there is no proposal-width tuning. See [doc/emcee.md](emcee.md) for full details, the complete `mcmc:` key reference, run commands, and diagnostics.
 
 ```yaml
 prior: mcmc
-num_models: 500
+num_models: 1            # emcee uses one model per worker; keeps the >10000 guard happy
 mcmc:
-  burn_in: 100
-  max_attempts: 50000
-  accept_invalid: false
+  nwalkers: 64           # ensemble size (>= 2*ndim, even, = 2*nworkers)
+  nworkers: 32           # worker-pool size / CPUs for the chain rule
+  max_steps: 20000       # iteration cap (convergence usually stops earlier)
+  burn_in: 200           # absolute floor (iterations) on the ntuple burn-in
+  check_every: 100       # autocorrelation / progress cadence
+  init:
+    strategy: spread     # uniform across the prior (or `ball` around center_file)
+  moves:
+    - {type: StretchMove, kwargs: {a: 2.0}, weight: 1.0}
+  record_observables:    # emcee blobs -> ntuple branches
+    - {name: m_h, branch: SP_m_h, source: {step: SPheno, file_type: slha, block: MASS, entry: 25}}
 constraints:
   - name: higgs_mass
     ...

@@ -1,5 +1,5 @@
 prior: mcmc
-num_models: 500
+num_models: 1          # emcee uses modelnum=0 per worker; keeps the >10000 guard happy
 isGMSB: False
 
 parameters:
@@ -24,29 +24,26 @@ parameters:
   mbR: [0, 2000]
 
 mcmc:
-  burn_in: 100
-  max_attempts: 50000
-  accept_invalid: false
-  proposal_widths:
-    tanb: 3.0
-    M_1: 100.0
-    M_2: 100.0
-    M_3: 200.0
-    AT: 400.0
-    Ab: 100.0
-    Atau: 100.0
-    mu: 100.0
-    mA: 100.0
-    meL: 100.0
-    mtauL: 100.0
-    meR: 100.0
-    mtauR: 100.0
-    mqL1: 200.0
-    mqL3: 100.0
-    muR: 200.0
-    mtR: 100.0
-    mdR: 200.0
-    mbR: 100.0
+  # emcee affine-invariant ensemble sampler (see doc/emcee.md). No proposal-width
+  # tuning: the stretch move adapts to the target's scale and correlations.
+  nwalkers: 64            # >= 2*ndim; even; = 2*nworkers (one wave per half-step)
+  nworkers: 32
+  max_steps: 20000        # cap; convergence (N > 50*tau) usually stops earlier
+  burn_in: 200            # absolute floor (iterations) on the ntuple burn-in
+  burn_in_factor: 3       # ntuple discard = max(burn_in, ceil(burn_in_factor*max_tau))
+  check_every: 100        # autocorr / progress cadence (iterations)
+  target_autocorr_factor: 50
+  tau_rel_tol: 0.01
+  init:
+    strategy: spread      # uniform across the prior
+  moves:
+    - {type: StretchMove, kwargs: {a: 2.0}, weight: 1.0}
+  record_observables:     # emcee blobs -> ntuple branches
+    - {name: m_h,       branch: SP_m_h,            source: {step: SPheno,   file_type: slha, block: MASS, entry: 25}}
+    - {name: Omega,     branch: MO_Omega,          source: {step: micromegas, file_type: csv, variable: Omega}}
+    - {name: BR_bsg,    branch: SI_BR_b_to_sgamma, source: {step: superiso, file_type: flha, block: FOBS, entry: [5, 1]}}
+    - {name: BR_bsmumu, branch: SI_BR_Bs_to_mumu,  source: {step: superiso, file_type: flha, block: FOBS, entry: [531, 1]}}
+    - {name: a_mu,      branch: GM2_gmuon,         source: {step: gm2calc,  file_type: slha, block: GM2CALCOUTPUT, entry: 0}}
 
 constraints:
   - name: higgs_mass
