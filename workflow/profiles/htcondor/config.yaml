@@ -53,7 +53,25 @@ default-resources:
   htcondor_request_disk_mb: 4000
   htcondor_request_mem_mb: 4000
 
+# threads -> request_cpus, and a GROUP job's request is the sum over the steps snakemake
+# packs into one layer -- so this knob is multiplied by ~6 before it reaches condor, and
+# it decides WHICH lxbatch hostgroup can run the job. Measured, same DAG, 300 batches:
+#
+#   step: 4  ->  24 CPU / 60 GB  ->  Hostgroup "bi/condor/gridworker/bigmcore"
+#                                    10 slots in a 5274-slot pool, 0 free
+#   step: 1  ->   7 CPU / 21 GB  ->  Hostgroup "share/mixed|shareshort|sharelong"
+#                                    107 slots matching, 38 free immediately
+#
+# The 24-CPU version was submitted 2026-08-03 and sat at 9 running / 291 idle for 20h
+# with 0 batches finished. Hence 1, and check `condor_q -better-analyze` after changing
+# it -- a request that silently lands in bigmcore looks fine and never schedules.
+#
+# 1 costs nothing real: NOTHING here is threaded. Every tool runs in the sequential
+# per-model loop at modelgen.py:724, r3mg_batch.py takes no thread/-j option, and
+# SModelS is pinned to `ncpus = 1` in data/SModelS_parameters.ini. The 4 was a
+# reservation the code could not spend. Steps still overlap (7 CPUs), and even fully
+# serialised a batch costs only ~10% more wall clock, because SModelS is ~86% of it.
 set-threads:
-  step: 4               # threads -> request_cpus; group max = legacy RequestCpus=4
+  step: 1
   # chain: no override -> the chain rule's own `threads` (= mcmc.nworkers; 1 for MH)
   # drives request_cpus. A wide emcee run also needs more memory (per-run override).
