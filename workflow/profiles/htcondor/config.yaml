@@ -51,7 +51,38 @@ default-resources:
   # cap) plus the tarball built beside it, plus headroom. Under-requesting here does
   # not fail cleanly — the job fills its scratch and dies mid-batch.
   htcondor_request_disk_mb: 4000
-  htcondor_request_mem_mb: 4000
+  # PER-RULE, and summed over the widest DAG level (5 rules: the SPheno consumers), so
+  # this is multiplied by 5 before condor sees it. It can also silently set RequestCpus,
+  # which set-threads then has no say over. lxbatch normalises every request to a floor
+  # of 3000 MB per core:
+  #
+  #   cores  = max(request_cpus, ceil(request_mem / 3000))
+  #   memory = max(request_mem, cores * 3000)
+  #
+  # Measured by hand-submitting probe jobs (asked -> granted):
+  #
+  #   1 cpu /  1000 MB  ->  1 cpu /  3000 MB      5 cpu / 20000 MB  ->  7 cpu / 21000 MB
+  #   1 cpu /  9000 MB  ->  3 cpu /  9000 MB      5 cpu / 10000 MB  ->  5 cpu / 15000 MB
+  #
+  # 4000 here therefore asked 5x4000 = 20000 MB, which ceil(20000/3000) rounded UP to
+  # 7 cores -- two more than snakemake requested, bought purely by the memory figure.
+  # Fair share is billed in cores and the group only really uses ~1 (SModelS is 86% of
+  # the batch and single-threaded), so that inflation directly cut how many batches the
+  # u_zp quota could run at once.
+  #
+  # 1200 asks 5 * 1200 = 6000 MB, paired with the classad_RequestCpus override below.
+  # KEEP THE INVARIANT  5 * htcondor_request_mem_mb == 3000 * classad_RequestCpus:
+  # if the memory total exceeds cores * 3000, lxbatch rounds the CORE count up again
+  # and the override is undone.
+  #
+  # Headroom check: RequestMemory is an enforced ceiling (exceed it and the job is
+  # held), the five steps run concurrently, and SModelS alone loads a ~1.4 GB
+  # results-database pickle. Peak MemoryUsage on the 10k-model run of 2026-08-03 was
+  # 2693 MB -- on 5x LARGER batches than we now run -- so 6000 MB is ~2.2x headroom.
+  # Do not go to 1 core: that caps memory at 3000 MB, only 1.1x the observed peak.
+  htcondor_request_mem_mb: 1200
+  # The core-count override lives in set-resources at the bottom of this file, NOT here
+  # -- see the comment there for why a default-resource cannot express it.
 
 # threads -> request_cpus, and a GROUP job's request is the sum over the steps snakemake
 # packs into one layer -- so this knob is multiplied by ~6 before it reaches condor, and
@@ -75,3 +106,36 @@ set-threads:
   step: 1
   # chain: no override -> the chain rule's own `threads` (= mcmc.nworkers; 1 for MH)
   # drives request_cpus. A wide emcee run also needs more memory (per-run override).
+
+# Cores actually BILLED to the fair-share quota, decoupled from the DAG width.
+#
+# set-threads above can only floor request_cpus at the widest level's job count (5, the
+# SPheno fan-out), and the plugin offers no request_cpus override -- it hard-wires
+# `request_cpus = str(job.threads)`. But it forwards any classad_* resource verbatim as
+# `+X`, and `+RequestCpus` beats `request_cpus`. Hand-submitted proof:
+#
+#   request_cpus=5, +RequestCpus=2, request_memory=6000  ->  granted 2 cores / 6000 MB
+#
+# WHY ON `sample` AND NOT IN default-resources: a default-resource is attached to every
+# rule and then SUMMED over the widest level, so classad_RequestCpus=2 there yields
+# 5 x 2 = 10 cores (and 10 * 3000 = 30000 MB) -- measured, and worse than the 7 it was
+# meant to fix. Group aggregation is max-over-levels of sum-within-level, so declaring it
+# on `sample` -- the only job in toposort level 0 -- makes the group total exactly 2.
+# Any rule that is alone in its level would do; sample is simply the first.
+#
+# 2 rather than 5 costs no wall clock: level 3 takes max(SModelS 3.420, the other four
+# 0.365) = 3.420 s/model either way, because SModelS is single-threaded and ~86% of the
+# batch. 1 core would cost ~10% (3.785 s/model) AND cap memory at 3000 MB, only 1.1x the
+# observed 2693 MB peak.
+#
+# It does not reduce in-job parallelism nor newly oversubscribe: the remote snakemake is
+# invoked with `--cores all` (snakemake_interface_executor_plugins/executors/remote.py --
+# cores is constrained only if --cores was passed on the submit side, which it is not),
+# so all five fan-out steps already ran concurrently regardless of RequestCpus. This
+# changes what the quota is charged, not what the job does.
+#
+# Keep in step with htcondor_request_mem_mb: 5 * mem == 3000 * cpus, or lxbatch's
+# 3000-MB-per-core floor rounds the core count back up and undoes this.
+set-resources:
+  sample:
+    classad_RequestCpus: 2

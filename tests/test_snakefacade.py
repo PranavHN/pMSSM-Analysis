@@ -293,22 +293,30 @@ def test_run_detached_without_a_warn_callback_is_quiet(monkeypatch, tmp_path):
 
 # ── --default-resources REPLACES the profile block, so they must agree ──────
 
-def test_flavour_resources_covers_every_profile_default(repo):
+def test_flavour_resources_reproduces_the_profile_exactly(repo):
     '''snakemake's --default-resources replaces the profile's block instead of
     merging. The entrypoints always pass it, so any key declared only in
     workflow/profiles/htcondor/config.yaml is silently dropped for every real
-    run — which is exactly how max_retries went missing. Adding a key to the
-    profile must therefore fail here until the facade repeats it.'''
+    run — which is exactly how max_retries went missing.
+
+    Compare VALUES, not just key names. An earlier version of this test compared
+    key sets only, so editing a value in the profile alone (mem 4000 -> 3000) kept
+    the suite green while every submission carried on using the facade's copy. The
+    facade now derives its values from the profile, so this pins that it really
+    round-trips rather than merely covering the same keys.'''
     import yaml
 
     profile = yaml.safe_load(
         (repo / "workflow" / "profiles" / "htcondor" / "config.yaml").read_text())
-    declared = set(profile.get("default-resources", {}))
-    passed = {entry.split("=", 1)[0] for entry in sf.flavour_resources("tomorrow")}
-    missing = declared - passed
-    assert not missing, (
-        f"{sorted(missing)} are in the htcondor profile's default-resources but not in "
-        f"flavour_resources(), so the entrypoints drop them")
+    declared = dict(profile.get("default-resources", {}))
+    # classad_JobFlavour is the one per-run value the facade substitutes.
+    expected = {key: str(value) for key, value in declared.items()}
+    expected["classad_JobFlavour"] = "'espresso'"
+
+    got = dict(entry.split("=", 1) for entry in sf.flavour_resources("espresso"))
+    assert got == expected, (
+        "flavour_resources() and the htcondor profile's default-resources disagree; "
+        "the CLI copy wins at submit time, so the profile would be a silent lie")
 
 
 

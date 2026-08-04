@@ -57,26 +57,43 @@ def snakemake_argv(backend: str, cfg: dict, targets=(), extra=()) -> list:
     return argv
 
 
+def htcondor_profile_defaults() -> dict:
+    '''The htcondor profile's default-resources block, as declared on disk.'''
+    cfg = os.path.join(repo_root(), "workflow", "profiles", "htcondor", "config.yaml")
+    with open(cfg) as handle:
+        return yaml.safe_load(handle).get("default-resources") or {}
+
+
 def flavour_resources(flavour: str) -> list:
     '''--default-resources entries for a JobFlavour, passed as a COMPLETE set.
 
-    Snakemake's --default-resources replaces the profile's default-resources
-    block rather than merging with it, so every entry the htcondor profile
-    declares must be repeated here or it silently vanishes for anything launched
-    through the entrypoints. tests/test_snakefacade.py pins the two together.
+    Snakemake's --default-resources REPLACES the profile's default-resources block
+    rather than merging with it, so every entry the htcondor profile declares has
+    to be repeated on the command line or it silently vanishes for anything
+    launched through the entrypoints.
+
+    The values are therefore READ FROM THE PROFILE rather than restated here: the
+    profile is the single source of truth and the two cannot drift. They used to be
+    two hand-kept lists, and because the pinning test compared only key NAMES, a
+    profile-only edit of a VALUE passed the suite while every real submission kept
+    using the copy in this file -- silently, since the profile is also the file a
+    reader would check. Only classad_JobFlavour is substituted, being per-run.
+
+    NB the core-count override (+RequestCpus) deliberately lives in the profile's
+    set-resources, NOT in default-resources: a default-resource is applied to every
+    rule and then SUMMED across the widest DAG level, so classad_RequestCpus=2 as a
+    default became 5 x 2 = 10 cores -- worse than the 7 it was meant to fix.
+    set-resources is not replaced by a CLI --default-resources, so it survives this
+    entrypoint untouched and needs no mirroring here.
     '''
-    return [
-        # Quoted so snakemake evaluates the value to the *bare* string espresso:
-        # the htcondor plugin adds the quotes the submit file needs itself
-        # (+JobFlavour = "espresso"), so embedding them here yields ""espresso"".
-        f"classad_JobFlavour='{flavour}'",
-        'classad_MaxRuntime=604800',
-        # Must cover a whole batch: genModels.py defaults the batch data into
-        # $_CONDOR_SCRATCH_DIR. Keep in step with the htcondor profile, which
-        # explains the sizing (tests/test_snakefacade.py pins the two together).
-        'htcondor_request_disk_mb=4000',
-        'htcondor_request_mem_mb=4000',
-    ]
+    declared = htcondor_profile_defaults()
+    # Quoted so snakemake evaluates the value to the *bare* string espresso: the
+    # htcondor plugin adds the quotes the submit file needs itself
+    # (+JobFlavour = "espresso"), so embedding them here yields ""espresso"".
+    entries = [f"classad_JobFlavour='{flavour}'"]
+    entries += [f"{key}={value}" for key, value in declared.items()
+                if key != "classad_JobFlavour"]
+    return entries
 
 
 def scheduler_extra(backend: str, log_dir: str = None, flavour: str = "tomorrow") -> list:
