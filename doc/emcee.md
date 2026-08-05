@@ -256,16 +256,32 @@ Two implementation details that matter if you touch it:
   only a lower bound). With a single ensemble — which is what every chain job's automatic
   run has — the draws are split into `RANK_SEGMENTS` consecutive time slices instead,
   making it a *stationarity/drift* check; the output labels it as such.
-* **The histogram uses every draw; the test does not.** At τ ≈ 2000 the draws are far from
-  independent, and a χ² that assumes independence rejects essentially always (measured:
-  statistic inflated ≈ 17×, 100 % false-positive rate). Scaling by ESS/N over-corrects by
-  an order of magnitude, because bin counts are sums of *indicators* whose autocorrelation
-  time is much shorter than the parameter's. So the test thins by τ and uses an exact
-  contingency-table homogeneity χ²: pooled ranks fix both margins, giving
-  dof = (C−1)(B−1), which is calibrated at its nominal level. A panel can therefore look
-  slightly uneven and still pass — read the p-value, not the wiggle. p-values are
-  Holm-corrected across parameters, and the row is **advisory**: R̂ already gates
-  inter-chain agreement.
+* **Everything shown and tested is τ-thinned**, as the SBC literature recommends [6]. At
+  τ ≈ 2000 the draws are nowhere near independent, and a χ² that assumes independence
+  rejects essentially always (measured: statistic inflated ≈ 17×, 100 % false-positive
+  rate). Scaling by ESS/N over-corrects by an order of magnitude, because bin counts are
+  sums of *indicators* whose autocorrelation time is much shorter than the parameter's.
+  So the test thins by τ and uses an exact contingency-table homogeneity χ²: pooled ranks
+  fix both margins, giving dof = (C−1)(B−1), calibrated at its nominal level. Thinning
+  matters for the *plot* too: autocorrelation does not bias the histogram (flat in
+  expectation either way) but an all-draws histogram looks far smoother than its
+  information content justifies — 4 M correlated draws carry a few thousand draws' worth —
+  so reading precision off it is a trap. The solid curves are therefore the thinned
+  sample; the faint ones are all draws, for comparison. The ECDF band likewise assumes
+  independence and is built from the thinned sample: fed all draws it would be ≈ √τ ≈ 48×
+  too narrow and condemn everything. p-values are Holm-corrected across parameters, and
+  the row is **advisory**: R̂ already gates inter-chain agreement.
+
+* **What multimodality does and does not do to it.** A multimodal posterior is *still*
+  expected to give flat ranks — the null is "all chains sample the same distribution",
+  whatever its shape, and the rank transform is distribution-free. Multimodality shows up
+  only when chains **disagree** about it: seeds trapped in *different* modes are caught
+  decisively, but if every seed is stuck in the *same* mode the ranks are flat, R̂ ≈ 1, and
+  nothing flags it (the standard limitation this shares with R̂, and the gap real SBC would
+  close). The check is also **marginal, not joint**: chains that agree on every 1-D
+  marginal but occupy opposite (M_1, M_2) sign octants pass it cleanly. The relative-sign
+  octant occupancy table printed just above is the sensitive instrument for that, and for
+  this model it is the more relevant one — read the two together.
 
 ```bash
 pixi run emcee_diagnostics \

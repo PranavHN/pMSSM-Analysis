@@ -1038,11 +1038,14 @@ _RANK_COLOURS = ("#2c6fbb", "#d62728", "#e8a33d", "#2ca02c",
 def plot_rank_hist(res, params, outpath) -> str:
     '''Rank histograms: one panel per parameter, one step histogram per chain.
 
-    Uniform is the null. Bars are drawn from EVERY post-burn-in draw, so the curves are
-    smooth; the annotated p-value comes from the tau-thinned subsample instead, because
-    at this sample size autocorrelation makes visible wiggles untestable. A panel can
-    therefore look slightly uneven and still be consistent with uniformity -- read the
-    p, not the wiggle.'''
+    Uniform is the null. The solid curves are the TAU-THINNED sample, matching the
+    p-value and the ECDF figure, as the SBC literature recommends [6]: autocorrelation
+    does not bias the histogram (it is flat in expectation either way) but it does make
+    an all-draws histogram look far smoother than its information content justifies --
+    measured ~2x on a tau=199 toy, more at production tau -- because 4 M correlated draws
+    carry a few thousand draws' worth of information. Reading precision off that is the
+    trap. The faint curves are the all-draws version, kept for reference so the two can
+    be compared; where they differ, the solid one is the honest one.'''
     if not any(res["hist"][p].sum() for p in params if p in res["hist"]):
         raise ValueError("no post-burn-in draws to rank (chain shorter than the discard)")
     n = len(params)
@@ -1050,16 +1053,23 @@ def plot_rank_hist(res, params, outpath) -> str:
     nrow = int(np.ceil(n / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 3.1 * nrow), squeeze=False)
     C = res["n_chains"]
+    thin = res.get("thinned_hist") or {}
     for i, name in enumerate(params):
         ax = axes[i // ncol][i % ncol]
-        h = res["hist"][name]
+        h_all = res["hist"][name]
+        h = thin.get(name, h_all)          # solid = thinned when the test was estimable
         B = h.shape[1]
         centres = (np.arange(B) + 0.5) / B
         for c in range(C):
+            col = _RANK_COLOURS[c % len(_RANK_COLOURS)]
+            if name in thin:               # faint all-draws reference underneath
+                ta = h_all[c].sum()
+                if ta:
+                    ax.step(centres, h_all[c] / ta * B, where="mid",
+                            color=col, lw=0.8, alpha=0.35)
             tot = h[c].sum()
             frac = h[c] / tot if tot else h[c]
-            ax.step(centres, frac * B, where="mid",
-                    color=_RANK_COLOURS[c % len(_RANK_COLOURS)], lw=1.4,
+            ax.step(centres, frac * B, where="mid", color=col, lw=1.4,
                     label=f"{'seg' if res['segmented'] else 'ens'}{c}")
         ax.axhline(1.0, color="k", ls="--", lw=1.0, alpha=0.6)
         d = res["per_param"].get(name, {})
@@ -1084,8 +1094,12 @@ def plot_rank_hist(res, params, outpath) -> str:
     for j in range(n, nrow * ncol):
         axes[j // ncol][j % ncol].axis("off")
     axes[0][0].legend(fontsize=7, ncol=2, frameon=False)
+    nthin = res.get("n_thinned", 0)
+    which = (f"solid = {nthin} tau-independent draws/chain, faint = all draws"
+             if nthin and thin else "all draws (test not estimable)")
     fig.suptitle(f"rank statistic ({res['label']}) -- uniform if all chains sample the "
-                 f"same distribution; NOT simulation-based calibration", fontsize=10)
+                 f"same distribution; NOT simulation-based calibration\n{which}",
+                 fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(outpath, dpi=130)
     plt.close(fig)
