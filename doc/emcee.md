@@ -226,9 +226,46 @@ is unmixed sign lobes rather than unconverged magnitudes. It also prints a **bur
 check** and uses the *same* τ-scaled discard rule as the sampler's ntuple, so the two
 stay consistent. It closes with a **criteria table** (every convergence requirement, why
 it exists, its reference, and this scan's verdict — see
-[Convergence checklist](#convergence-checklist)) and the CONVERGED / NOT CONVERGED
-banner. It can emit a ROOT `"susy"` ntuple per ensemble so `extractModels`
-(and other ntuple consumers) keep working.
+[Convergence checklist](#convergence-checklist)), opening with a scannable one-line-per-check
+SUMMARY, and the CONVERGED / NOT CONVERGED banner. It can emit a ROOT `"susy"` ntuple per
+ensemble so `extractModels` (and other ntuple consumers) keep working.
+
+#### Rank statistic (computational faithfulness)
+
+On **all samples pooled** the diagnostics also run a rank-statistic uniformity check
+(`rank_all.png`, `rank_ecdf_all.png`): rank every draw of a parameter pooled over every
+ensemble and walker, then histogram the ranks *per chain*. If all chains sample the same
+distribution each histogram is uniform, and the **shape** of any departure says how they
+differ — U-shaped = that chain is over-dispersed relative to the pooled sample,
+inverted-U = under-dispersed (concentrated in a sub-region, e.g. trapped in one sign
+lobe), skewed = shifted. That shape is the reason to have the check at all: R̂ tells you
+*whether* chains disagree, this tells you *how*.
+
+**It is not simulation-based calibration.** Betancourt's workflow §1.2 ranks a known
+simulating parameter inside posteriors refitted to simulated data, which certifies that
+the posterior is *calibrated*; that needs hundreds of refits, and one fit here is already
+~24.5 M full-pipeline evaluations (~12 000 core-hours). This check only certifies that the
+chains agree **with each other**. A uniform result is evidence against non-convergence,
+never evidence of correct calibration — and note the shape meanings differ from SBC's,
+where a U-shape instead means the posterior is too narrow.
+
+Two implementation details that matter if you touch it:
+
+* **Chains are the ensembles, not the walkers.** emcee's DE/snooker moves couple walkers,
+  so walker agreement is not evidence of convergence (same reason within-ensemble R̂ is
+  only a lower bound). With a single ensemble — which is what every chain job's automatic
+  run has — the draws are split into `RANK_SEGMENTS` consecutive time slices instead,
+  making it a *stationarity/drift* check; the output labels it as such.
+* **The histogram uses every draw; the test does not.** At τ ≈ 2000 the draws are far from
+  independent, and a χ² that assumes independence rejects essentially always (measured:
+  statistic inflated ≈ 17×, 100 % false-positive rate). Scaling by ESS/N over-corrects by
+  an order of magnitude, because bin counts are sums of *indicators* whose autocorrelation
+  time is much shorter than the parameter's. So the test thins by τ and uses an exact
+  contingency-table homogeneity χ²: pooled ranks fix both margins, giving
+  dof = (C−1)(B−1), which is calibrated at its nominal level. A panel can therefore look
+  slightly uneven and still pass — read the p-value, not the wiggle. p-values are
+  Holm-corrected across parameters, and the row is **advisory**: R̂ already gates
+  inter-chain agreement.
 
 ```bash
 pixi run emcee_diagnostics \
@@ -284,18 +321,27 @@ from the numbers above:
 | 4 | mean acceptance fraction | 0.2 – 0.5 | advisory | [2,5] |
 | 5 | tail ESS | min ESS_tail ≥ 400 | advisory | [4] |
 | 6 | burn-in adequacy | discard ≥ log-prob plateau | advisory | [1,2] |
+| 7 | rank uniformity | Holm-adjusted p ≥ 0.01 | advisory | [4,6,7] |
+
+Above the rows the table prints a **SUMMARY** line — `hard 1/3 PASS`, `advisory 2/4 ok`,
+then one `[verdict] name` cell per check — so "what failed?" is answerable at a glance
+without reading the rationale for each.
 
 CONVERGED requires all three **hard** rows. The advisory rows are reported but never
 veto the verdict: off-band acceptance flags slow mixing without invalidating a chain
 that already meets the R̂/ESS/τ criteria — and in 1–2 free dimensions the stretch
 move accepts intrinsically often (its `z^(ndim-1)` factor is ~1), so a high value
-there is expected; raise `StretchMove`'s `a` to bring it down.
+there is expected; raise `StretchMove`'s `a` to bring it down. Rank uniformity is
+advisory because R̂ already gates inter-chain agreement — its value is the *shape*
+diagnosis, not a second veto.
 
 If `N < 50τ`, re-run (with `--forcerun chain`) to add iterations.
 
-The thresholds live in one place — `TAU_FACTOR`, `RHAT_MAX`, `ESS_MIN`, `ACC_BAND`
-in `scripts/emcee_diagnostics.py` — shared by the table and the verdict so the two
-cannot drift apart.
+The thresholds live in one place — `TAU_FACTOR`, `RHAT_MAX`, `ESS_MIN`, `ACC_BAND`,
+`RANK_BINS`, `RANK_P_MIN`, `RANK_SEGMENTS`, `RANK_Z_FLAT` in
+`scripts/emcee_diagnostics.py`. The three gating conditions are built once in
+`_hard_verdicts()` and read by both the table and the verdict, so they cannot drift
+apart.
 
 1. Goodman & Weare 2010, Comm. App. Math. Comp. Sci. **5**, 65 — the affine-invariant
    ensemble sampler (stretch move) emcee implements.
@@ -309,3 +355,12 @@ cannot drift apart.
    bulk/tail ESS as arviz computes them, with the ESS ≥ 400 and R̂ < 1.01 recommendations.
 5. Roberts, Gelman & Gilks 1997, Ann. Appl. Probab. **7**, 110 — the optimal-scaling
    result (acceptance → 0.234 in high dimension) behind the healthy band.
+6. Talts, Betancourt, Simpson, Vehtari & Gelman 2018 —
+   [arXiv:1804.06788](https://arxiv.org/abs/1804.06788) — simulation-based calibration:
+   the rank statistic and how to read pathology off its histogram. See also Betancourt's
+   [principled Bayesian workflow](https://betanalpha.github.io/assets/case_studies/principled_bayesian_workflow.html#12_Computational_Faithfulness)
+   §1.2. NB SBC itself is not what the diagnostics compute — see
+   [Rank statistic](#rank-statistic-computational-faithfulness).
+7. Säilynoja, Bürkner & Vehtari 2022, Stat. Comput. **32**, 32 —
+   [arXiv:2103.10522](https://arxiv.org/abs/2103.10522) — the uniform-ECDF difference
+   plot with a simultaneous confidence band (`rank_ecdf_all.png`).

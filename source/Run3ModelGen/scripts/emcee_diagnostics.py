@@ -20,16 +20,24 @@ Reads one or more `emcee.backends.HDFBackend` files (plus their sidecar
     (walkers as chains) and ACROSS the independent ensembles (the strong test),
     plus a non-gating |M_1|,|M_2| magnitude-fold line as a reference floor for
     how much of the signed R-hat is unmixed sign lobes
+  * a rank-statistic uniformity check on ALL samples pooled (rank_all.png,
+    rank_ecdf_all.png): ranks pooled over every ensemble and walker, histogrammed
+    per chain, which must be uniform if every chain targets the same distribution.
+    Reports a chi-square p-value and the histogram SHAPE per chain, since the shape
+    is the diagnostic content. This is the Vehtari et al. rank plot, NOT
+    simulation-based calibration -- it certifies that the chains agree with each
+    other, never that the posterior is calibrated
   * a criteria table: every convergence requirement, why it exists (with a
-    literature reference), and whether this scan meets it -- followed by the
-    CONVERGED / NOT CONVERGED verdict, which is gated on the "hard" rows
+    literature reference), and whether this scan meets it, with a scannable
+    pass/fail summary -- followed by the CONVERGED / NOT CONVERGED verdict, which
+    is gated on the "hard" rows
 
 It can also bridge each backend to a ROOT "susy" ntuple (`--to-ntuple <dir>`)
 so the existing `extractModels` (and other ntuple consumers) keep working.
 
-Self-contained: the diagnostics + plots import only numpy, emcee, matplotlib,
-corner, arviz, uproot and the standard library (all in the default pixi
-environment); PyYAML is used opportunistically to auto-detect the target
+Self-contained: the diagnostics + plots import only numpy, scipy, emcee,
+matplotlib, corner, arviz, uproot and the standard library (all in the default
+pixi environment); PyYAML is used opportunistically to auto-detect the target
 observable (falls back if absent). Only `--to-ntuple` additionally imports the
 (physics-free) `Run3ModelGen.emcee_ntuple` writer.
 
@@ -84,6 +92,10 @@ TAU_FACTOR = 50          # required chain length in units of tau        [1,2]
 RHAT_MAX = 1.05          # worst tolerated Gelman-Rubin R-hat           [3,4]
 ESS_MIN = 400            # required bulk (and desired tail) ESS         [4]
 ACC_BAND = (0.2, 0.5)    # healthy mean acceptance fraction             [2,5]
+RANK_BINS = 10           # rank-histogram bins for the uniformity test  [4,6]
+RANK_P_MIN = 0.01        # Holm-corrected p below this = non-uniform    [4,6]
+RANK_SEGMENTS = 4        # single-ensemble fallback: time segments      [4]
+RANK_Z_FLAT = 3.0        # |z| below this = no shape called             [6]
 
 _CRITERIA_REFS = [
     "[1] Goodman & Weare 2010, Comm. App. Math. Comp. Sci. 5, 65 -- the affine-invariant",
@@ -98,11 +110,43 @@ _CRITERIA_REFS = [
     "    computes them here, with the ESS >= 400 and R-hat < 1.01 recommendations.",
     "[5] Roberts, Gelman & Gilks 1997, Ann. Appl. Probab. 7, 110 -- the optimal-scaling",
     "    result (acceptance -> 0.234 in high dimension) behind the healthy band.",
+    "[6] Talts, Betancourt, Simpson, Vehtari & Gelman 2018 -- arXiv:1804.06788 --",
+    "    simulation-based calibration: the rank statistic, and reading pathology off the",
+    "    shape of its histogram (U / inverted-U / skewed). SBC itself needs many refits",
+    "    against simulated ground truth and is NOT what is computed here; see the rank",
+    "    uniformity block for exactly what this check does and does not certify.",
+    "[7] Saeilynoja, Buerkner & Vehtari 2022, Stat. Comput. 32, 32 -- arXiv:2103.10522 --",
+    "    the uniform-ECDF difference plot with a simultaneous confidence band, used for",
+    "    the rank_ecdf figure.",
 ]
 
 
+def _hard_verdicts(rhat_res, n50_flags):
+    '''The three gating criteria, as ``[(name, ok, failure_message)]``.
+
+    THE single source of truth: both the criteria table and the final verdict read this,
+    so a threshold or a criterion can never be changed in one and forgotten in the
+    other. Previously each re-derived the same three conditions from the module
+    constants independently, which is exactly the kind of duplication that drifts.
+
+    `ok` is tri-state: True / False / None = not estimable.'''
+    worst_rhat = rhat_res["worst_rhat"] if rhat_res else float("nan")
+    min_ess = rhat_res["min_ess_bulk"] if rhat_res else float("nan")
+    all_n50 = bool(n50_flags) and all(n50_flags)
+    return [
+        ("chain length vs tau", all_n50 if n50_flags else None,
+         f"chain too short: N < {TAU_FACTOR}*tau for at least one ensemble"),
+        ("Gelman-Rubin R-hat",
+         (worst_rhat < RHAT_MAX) if np.isfinite(worst_rhat) else None,
+         f"R-hat {worst_rhat:.3f} >= {RHAT_MAX}"),
+        ("bulk effective sample size",
+         (min_ess >= ESS_MIN) if np.isfinite(min_ess) else None,
+         f"ESS_bulk {min_ess:.0f} < {ESS_MIN}"),
+    ]
+
+
 def _emit_criteria_table(rhat_res, n50_flags, n_iters, tau_maxes,
-                         acc_means, discard, plateau) -> None:
+                         acc_means, discard, plateau, rank_res=None) -> None:
     '''Tabulate every criterion the scan is judged on: what it requires, why it
     exists (with a literature reference), and whether THIS scan meets it.
 
@@ -118,7 +162,6 @@ def _emit_criteria_table(rhat_res, n50_flags, n_iters, tau_maxes,
     min_tail = rhat_res.get("min_ess_tail", float("nan")) if rhat_res else float("nan")
     scope = rhat_res.get("label", "?") if rhat_res else "not computed (arviz step skipped)"
     acc = float(np.nanmean(acc_means)) if acc_means else float("nan")
-    all_n50 = bool(n50_flags) and all(n50_flags)
 
     # Chain length: quote the ensemble that sits furthest from the N > TAU_FACTOR*tau line.
     ratios = [n / (TAU_FACTOR * t) if (np.isfinite(t) and t > 0) else float("nan")
@@ -129,20 +172,23 @@ def _emit_criteria_table(rhat_res, n50_flags, n_iters, tau_maxes,
     else:
         len_val = "n/a"
 
+    # ok flags come from _hard_verdicts so the table and the verdict cannot disagree
+    hard_ok = {name: ok for name, ok, _ in _hard_verdicts(rhat_res, n50_flags)}
+
     # (name, requirement, measured, ok, word-if-not-ok, why-lines)
     hard = [
         ("chain length vs tau", f"N > {TAU_FACTOR}*tau, every ens", len_val,
-         all_n50 if n50_flags else None, "FAIL",
+         hard_ok["chain length vs tau"], "FAIL",
          ["tau is the number of steps between effectively independent samples. Below",
           f"~{TAU_FACTOR}*tau the tau estimate is only a lower bound, so the ESS and R-hat",
           "derived from it cannot be trusted either.  [1,2]"]),
         ("Gelman-Rubin R-hat", f"worst R-hat < {RHAT_MAX}", _fmt(worst_rhat),
-         (worst_rhat < RHAT_MAX) if np.isfinite(worst_rhat) else None, "FAIL",
+         hard_ok["Gelman-Rubin R-hat"], "FAIL",
          ["Between-chain over within-chain variance: > 1 means the chains still disagree",
           "about the posterior (stuck walkers, an unmixed mode). arviz computes the",
           "rank-normalized split form; < 1.01 is the stricter modern target.  [3,4]"]),
         ("bulk effective sample size", f"min ESS_bulk >= {ESS_MIN}", _fmt(min_bulk, ".0f"),
-         (min_bulk >= ESS_MIN) if np.isfinite(min_bulk) else None, "FAIL",
+         hard_ok["bulk effective sample size"], "FAIL",
          ["Independent-sample count behind the bulk of the posterior (mean, median). The",
           f"recommended floor is {ESS_MIN}: below it the Monte-Carlo error on posterior",
           "summaries -- and the R-hat/ESS estimates themselves -- stop being reliable.  [4]"]),
@@ -166,21 +212,60 @@ def _emit_criteria_table(rhat_res, n50_flags, n_iters, tau_maxes,
           f"what the sampler applied ({discard} iterations).  [2]"]),
     ]
 
+    if rank_res is not None:
+        rp = rank_res.get("worst_p", float("nan"))
+        rw = rank_res.get("worst_param")
+        shapes = sorted({s for sh in rank_res.get("shapes", {}).values() for s in sh
+                         if s not in ("uniform", "n/a")})
+        scope_txt = ("time segments of one ensemble" if rank_res.get("segmented")
+                     else f"{rank_res.get('n_chains', 0)} ensembles")
+        detail = (f"worst {rw}" if rw else "n/a")
+        if shapes:
+            detail += "; shapes seen: " + ", ".join(shapes)
+        advisory.append(
+            ("rank uniformity", f"Holm p >= {RANK_P_MIN}",
+             "n/a" if not np.isfinite(rp) else f"{rp:.1e}",
+             (rp >= RANK_P_MIN) if np.isfinite(rp) else None, "non-uniform",
+             ["Ranks pooled over all samples, histogrammed per chain, must be uniform if",
+              "every chain samples the same distribution; the SHAPE says how they differ",
+              "(U = over-dispersed vs pooled, inverted-U = under-dispersed/trapped,",
+              "skewed = shifted). Chains here are " + scope_txt + "; " + detail + ".",
+              "NOT simulation-based calibration -- it certifies the chains agree with each",
+              "other, not that the posterior is calibrated.  [4,6,7]"]))
+
     words = {True: "PASS", False: "FAIL", None: "UNKNOWN"}
+    soft = {True: "ok", False: None, None: "n/a"}     # False -> the row's own bad word
     bar = "=" * 88
+
+    # Compact, scannable summary first: the detailed rows below explain WHY each
+    # criterion exists, but the question a reader arrives with is "what failed?".
+    n_hard_pass = sum(1 for r in hard if r[3] is True)
+    n_soft_ok = sum(1 for r in advisory if r[3] is True)
+    summary = [f"SUMMARY  hard {n_hard_pass}/{len(hard)} PASS   "
+               f"advisory {n_soft_ok}/{len(advisory)} ok"]
+    for group, rows in (("hard", hard), ("advisory", advisory)):
+        cells = []
+        for name, _req, _val, ok, bad, _why in rows:
+            word = words[ok] if group == "hard" else (soft[ok] or bad)
+            cells.append(f"[{word}] {name}")
+        # wrap at three per line so the block stays readable in a terminal
+        for i in range(0, len(cells), 3):
+            summary.append("    " + "   ".join(cells[i:i + 3]))
+
     out = [bar,
            f"CONVERGENCE CRITERIA  ({len(hard)} hard -- all must pass for CONVERGED; "
            f"{len(advisory)} advisory)",
            f"  R-hat / ESS measured on: {scope}",
            ""]
+    out.extend(summary)
+    out.append("")
     n = 0
     for group, rows in (("hard", hard), ("advisory -- reported, never vetoes the verdict",
                                          advisory)):
         out.append(f"  --- {group} ---")
         for name, req, val, ok, bad, why in rows:
             n += 1
-            verdict = words[ok] if group == "hard" else \
-                {True: "ok", False: bad, None: "n/a"}[ok]
+            verdict = words[ok] if group == "hard" else (soft[ok] or bad)
             out.append(f"  {n}  {name:<26s} {req:<24s} {val:<22s} {verdict}")
             for line in why:
                 out.append(f"        {line}")
@@ -200,7 +285,6 @@ def _emit_convergence_verdict(rhat_res, n50_flags, acc_means, max_tau) -> None:
     meets the R-hat / ESS / autocorrelation criteria.'''
     worst_rhat = rhat_res["worst_rhat"] if rhat_res else float("nan")
     min_ess = rhat_res["min_ess_bulk"] if rhat_res else float("nan")
-    all_n50 = bool(n50_flags) and all(n50_flags)
     acc = float(np.nanmean(acc_means)) if acc_means else float("nan")
 
     # A chain too short to even estimate tau / R-hat / ESS is NOT converged — say so
@@ -216,13 +300,8 @@ def _emit_convergence_verdict(rhat_res, n50_flags, acc_means, max_tau) -> None:
               f"re-diagnose.\n{_bar}", warn=True)
         return
 
-    fails = []
-    if not all_n50:
-        fails.append(f"chain too short: N < {TAU_FACTOR}*tau for at least one ensemble")
-    if not (worst_rhat < RHAT_MAX):
-        fails.append(f"R-hat {worst_rhat:.3f} >= {RHAT_MAX}")
-    if not (min_ess >= ESS_MIN):
-        fails.append(f"ESS_bulk {min_ess:.0f} < {ESS_MIN}")
+    # Same rows the criteria table renders -- see _hard_verdicts.
+    fails = [msg for _name, ok, msg in _hard_verdicts(rhat_res, n50_flags) if ok is not True]
     acc_note = "" if (ACC_BAND[0] <= acc <= ACC_BAND[1]) else \
         f"  [mean acceptance {acc:.2f} outside the healthy ~{ACC_BAND[0]}-{ACC_BAND[1]} band]"
 
@@ -628,6 +707,37 @@ def plot_inputs_vs_target_data(chain, y, logp, params, target, outdir, tag,
     return written
 
 
+# ── sign folds (shared by the R-hat and rank checks) ────────────────────────
+
+def _folded_blocks(chains_list, params, discard, thin, canon=False, mag=False):
+    '''Slice each ensemble post-burn-in and apply the requested sign fold.
+
+    Returns a list of (ndraw, nwalkers, ndim) float arrays, one per ensemble. Shared
+    by rhat_ess and rank_uniformity so the two always analyse identical coordinates
+    -- the rank check is only interpretable next to the R-hat it accompanies.
+
+    See rhat_ess for what canon/mag mean physically. NB the copy() below is
+    load-bearing, not defensive: a float64 slice comes back as a VIEW, and the
+    caller's `chains` must stay signed for what runs afterwards (mode occupancy
+    re-reads the raw signs, and abs() is not reversible).'''
+    ci = {n: params.index(n) for n in ("M_1", "M_2", "mu") if n in params}
+    do_canon = (canon or mag) and len(ci) == 3
+    do_mag = mag and len(ci) == 3
+    blocks = []
+    for ch in chains_list:
+        blk = np.asarray(ch[discard::thin], dtype=float)   # (ndraw, nwalkers, ndim)
+        if do_canon:
+            blk = blk.copy()
+            neg = blk[:, :, ci["mu"]] < 0
+            for n in ("M_1", "M_2", "mu"):
+                blk[:, :, ci[n]] = np.where(neg, -blk[:, :, ci[n]], blk[:, :, ci[n]])
+        if do_mag:
+            for n in ("M_1", "M_2"):
+                blk[:, :, ci[n]] = np.abs(blk[:, :, ci[n]])
+        blocks.append(blk)
+    return blocks
+
+
 # ── arviz R-hat / ESS ───────────────────────────────────────────────────────
 
 def rhat_ess(chains_list, params, discard, thin, label, canon=False, mag=False):
@@ -648,24 +758,8 @@ def rhat_ess(chains_list, params, discard, thin, label, canon=False, mag=False):
     unmixed" (signed R-hat >> magnitude R-hat) from "the magnitudes themselves have
     not converged" (both high).'''
     import arviz as az
-    ci = {n: params.index(n) for n in ("M_1", "M_2", "mu") if n in params}
-    do_canon = (canon or mag) and len(ci) == 3
-    do_mag = mag and len(ci) == 3
-    blocks = []
-    for ch in chains_list:
-        blk = np.asarray(ch[discard::thin], dtype=float)   # (ndraw, nwalkers, ndim)
-        if do_canon:
-            # asarray on an already-float64 slice returns a VIEW, so copy before
-            # folding: the caller's `chains` must stay signed for what runs after
-            # (mode occupancy re-reads the raw signs, and abs() is not reversible).
-            blk = blk.copy()
-            neg = blk[:, :, ci["mu"]] < 0
-            for n in ("M_1", "M_2", "mu"):
-                blk[:, :, ci[n]] = np.where(neg, -blk[:, :, ci[n]], blk[:, :, ci[n]])
-        if do_mag:
-            for n in ("M_1", "M_2"):
-                blk[:, :, ci[n]] = np.abs(blk[:, :, ci[n]])
-        blocks.append(blk)
+    do_mag = mag and len({n for n in ("M_1", "M_2", "mu") if n in params}) == 3
+    blocks = _folded_blocks(chains_list, params, discard, thin, canon=canon, mag=mag)
     posterior = {}
     for pi, name in enumerate(params):
         cols = [b[:, :, pi].T for b in blocks]             # each (nwalkers, ndraw)
@@ -710,6 +804,345 @@ def rhat_ess(chains_list, params, discard, thin, label, canon=False, mag=False):
     _emit("\n".join(rows))
     return {"worst_rhat": worst_r, "min_ess_bulk": worst_e,
             "min_ess_tail": worst_t, "label": label}
+
+
+# ── rank statistic / computational faithfulness ─────────────────────────────
+
+def _rank_shape(counts):
+    '''Classify one chain's rank histogram: uniform / U / inverted-U / skewed.
+
+    The SHAPE is the diagnostic content of a rank histogram [6]. Two orthogonal
+    contrasts of the bin proportions p_b over midpoints x_b in (-1/2, 1/2):
+
+      location    L = sum_b p_b * x_b            (which end of the pooled range)
+      dispersion  Q = sum_b p_b * (x_b^2 - m2)   (extremes vs middle)
+
+    Standardised by the EXACT discrete null moments over the B midpoints, so there is
+    no continuous-approximation error from using 1/12 and 1/180.
+
+    Reading them here is NOT the SBC reading. In SBC the chains are refits against
+    known truth, so a U-shape means the posterior is too narrow. Here the chains are
+    independent MCMC replicates of one posterior, so a U-shape means THIS chain is
+    over-dispersed relative to the pooled sample, and an inverted-U means it is
+    under-dispersed -- concentrated in a sub-region, e.g. trapped in one sign lobe.
+
+    :returns: ``(label, z_location, z_dispersion)``.
+    '''
+    counts = np.asarray(counts, dtype=float)
+    n = counts.sum()
+    B = counts.size
+    if n <= 0 or B < 3:
+        return "n/a", float("nan"), float("nan")
+    p = counts / n
+    x = (np.arange(B) + 0.5) / B - 0.5
+    m2 = float((x ** 2).mean())
+    q = x ** 2 - m2
+    # exact null variances of the two contrasts under a uniform draw over the midpoints
+    var_x = float((x ** 2).mean())
+    var_q = float((q ** 2).mean())
+    if var_x <= 0 or var_q <= 0:
+        return "n/a", float("nan"), float("nan")
+    z_loc = float((p * x).sum() / np.sqrt(var_x / n))
+    z_dis = float((p * q).sum() / np.sqrt(var_q / n))
+    if max(abs(z_loc), abs(z_dis)) < RANK_Z_FLAT:
+        return "uniform", z_loc, z_dis
+    if abs(z_loc) >= RANK_Z_FLAT and abs(z_dis) >= RANK_Z_FLAT:
+        return "mixed", z_loc, z_dis
+    if abs(z_loc) >= abs(z_dis):
+        return ("skewed-high" if z_loc > 0 else "skewed-low"), z_loc, z_dis
+    return ("U-shaped" if z_dis > 0 else "inverted-U"), z_loc, z_dis
+
+
+def _holm(pvals):
+    '''Holm-Bonferroni step-down adjusted p-values (same order as the input).
+
+    The check runs over every parameter, so the smallest raw p out of ndim is not a
+    fair summary: with 9 independent parameters at a true 1% level, one hit is
+    expected ~9% of the time. Holm controls the family-wise rate without assuming
+    independence, and is uniformly less conservative than plain Bonferroni.'''
+    p = np.asarray(pvals, dtype=float)
+    m = p.size
+    out = np.full(m, np.nan)
+    finite = np.where(np.isfinite(p))[0]
+    if finite.size == 0:
+        return out
+    order = finite[np.argsort(p[finite])]
+    running = 0.0
+    for i, idx in enumerate(order):
+        adj = min(1.0, (order.size - i) * float(p[idx]))
+        running = max(running, adj)          # enforce monotonicity
+        out[idx] = running
+    return out
+
+
+def rank_uniformity(chains_list, params, discard, max_tau, label,
+                    canon=True, segments=RANK_SEGMENTS):
+    '''Rank-statistic uniformity across chains -- the computational-faithfulness check.
+
+    Rank every draw of a parameter POOLED over all chains, then histogram the ranks
+    separately per chain. If all chains target the same distribution each histogram is
+    uniform; departures show HOW they disagree (see _rank_shape). This is the rank plot
+    of Vehtari et al. [4], the computable stand-in for the simulation-based calibration
+    rank statistic of [6].
+
+    IT IS NOT SBC. SBC ranks a known simulating parameter inside posteriors refitted to
+    simulated data, and so certifies calibration; that needs hundreds of refits and is
+    out of reach for a likelihood that runs the full physics pipeline. This check only
+    certifies that the chains agree WITH EACH OTHER. A uniform result is evidence
+    against non-convergence, never evidence that the posterior is correctly calibrated.
+
+    Chains are the ENSEMBLES, not the walkers: emcee's DE/snooker moves couple walkers
+    within an ensemble, so walker agreement is not evidence of convergence. With a
+    single ensemble there are no independent replicates, so it is split into `segments`
+    consecutive time slices instead -- that is a stationarity/drift check, and is
+    labelled as such rather than passed off as the cross-seed one.
+
+    The histogram uses EVERY post-burn-in draw. The test does not: with tau ~ 2000 the
+    draws are far from independent, and a chi-square that assumes independence rejects
+    essentially always (measured: statistic inflated ~17x, 100% false-positive rate).
+    Scaling by ESS/N over-corrects by an order of magnitude, because bin counts are sums
+    of INDICATORS whose autocorrelation time is much shorter than the parameter's. So the
+    test thins by max_tau to genuinely independent draws and uses an exact
+    contingency-table homogeneity chi-square: pooled ranks fix both margins (N per chain,
+    CN/B per bin), giving dof = (C-1)(B-1), which is calibrated at its nominal level.
+
+    :returns: dict with worst_p (Holm-adjusted), worst_param, per_param, hist (for the
+        plots, from all draws), thinned_hist, shapes, n_chains, n_thinned, label,
+        segmented.
+    '''
+    from scipy.stats import chi2, rankdata
+
+    segmented = len(chains_list) < 2
+    blocks = _folded_blocks(chains_list, params, discard, 1, canon=canon)
+    if segmented:
+        # one ensemble -> consecutive time slices as pseudo-chains
+        blk = blocks[0]
+        cut = (blk.shape[0] // segments) * segments
+        groups = [blk[i * cut // segments:(i + 1) * cut // segments] for i in range(segments)]
+    else:
+        groups = blocks
+    C = len(groups)
+
+    # Flatten each chain over its walkers: one row = one draw = one unit of weight.
+    flat = [g.reshape(-1, g.shape[2]) for g in groups]
+    n_all = min(f.shape[0] for f in flat)          # equal lengths -> both margins fixed
+    flat = [f[:n_all] for f in flat]
+
+    # Independent subsample for the TEST: thin in TIME by tau and keep every walker.
+    # Striding the flattened array by tau*nwalkers instead would land on the same walker
+    # every time and throw away all the others -- on a 256-walker run that leaves single
+    # digits of draws and the test goes unestimable. Treating the surviving walkers as
+    # independent once a full tau has elapsed is emcee's own ESS convention
+    # (ESS ~ nwalkers * nsteps / tau, [2]); it is a convention, not a theorem, since the
+    # DE/snooker moves do couple walkers, so read the p-value alongside R-hat rather than
+    # as an independent verdict.
+    step = max(1, int(np.ceil(max_tau))) if np.isfinite(max_tau) else 1
+    thin_groups = [g[::step] for g in groups]
+    tflat = [g.reshape(-1, g.shape[2]) for g in thin_groups]
+    n_thin = min(f.shape[0] for f in tflat) if tflat else 0
+    tflat = [f[:n_thin] for f in tflat]
+
+    B = RANK_BINS
+    rows = [f"rank statistic / uniformity across chains ({label}): {C} chains x "
+            f"{n_all} draws, {B} bins",
+            f"  test on {n_thin} tau-independent draws/chain (every {step}th iteration "
+            f"~ max_tau={max_tau:.0f}, all walkers kept); histogram uses all draws",
+            "  NOT simulation-based calibration: this certifies the chains agree with "
+            "each other,",
+            "  not that the posterior is calibrated (SBC needs refits against simulated "
+            "truth). [4,6]"]
+
+    # chi-square needs an expected count of ~5 per cell to be trustworthy; below that
+    # the asymptotic distribution is a poor fit and the p-value means little.
+    estimable = n_thin >= 5 * B
+    if not estimable:
+        rows.append(f"  not estimable: {n_thin} independent draws/chain gives under 5 "
+                    f"expected per bin ({5 * B} needed for {B} bins) -- run longer, or "
+                    f"lower RANK_BINS")
+
+    hist_all, hist_thin, raw_p, per_param, shapes = {}, {}, [], {}, {}
+    for pi, name in enumerate(params):
+        cols = [f[:, pi] for f in flat]
+        pooled = np.concatenate(cols)
+        if not np.all(np.isfinite(pooled)):
+            # a non-finite draw makes the ranking meaningless for this parameter; report
+            # it as unestimable rather than ranking nan/inf into an arbitrary bin
+            hist_all[name] = np.zeros((C, B))
+            raw_p.append(float("nan"))
+            shapes[name] = ["n/a"] * C
+            per_param[name] = {"chi2": float("nan"), "dof": (C - 1) * (B - 1)}
+            continue
+        r = rankdata(pooled, method="average").reshape(C, n_all)
+        edges = np.linspace(0.0, float(r.size), B + 1)
+        hist_all[name] = np.stack([np.histogram(r[c], bins=edges)[0] for c in range(C)])
+        # Shapes are classified on the THINNED histogram, never this one: _rank_shape
+        # standardises by 1/sqrt(n), so at n ~ 4e6 correlated draws every |z| clears 2
+        # and every chain would be labelled shaped. Same trap as the chi-square.
+        shapes[name] = ["n/a"] * C
+
+        if estimable:
+            # rank the thinned draws in their own right, so the test statistic really is
+            # over independent observations rather than a subsample of pooled ranks
+            tp = np.concatenate([f[:, pi] for f in tflat])
+            tr = rankdata(tp, method="average").reshape(C, n_thin)
+            tedges = np.linspace(0.0, float(tr.size), B + 1)
+            th = np.stack([np.histogram(tr[c], bins=tedges)[0] for c in range(C)])
+            hist_thin[name] = th
+            shapes[name] = [_rank_shape(th[c])[0] for c in range(C)]
+            exp = n_thin / B
+            stat = float(((th - exp) ** 2 / exp).sum())
+            dof = (C - 1) * (B - 1)
+            raw_p.append(float(chi2.sf(stat, dof)))
+            per_param[name] = {"chi2": stat, "dof": dof}
+        else:
+            raw_p.append(float("nan"))
+            per_param[name] = {"chi2": float("nan"), "dof": (C - 1) * (B - 1)}
+
+    adj = _holm(raw_p)
+    for name, rp, ap in zip(params, raw_p, adj):
+        per_param.setdefault(name, {}).update({"p_raw": rp, "p_holm": ap})
+
+    rows.append(f"  {'param':10s} {'chi2':>9s} {'dof':>4s} {'p_raw':>9s} "
+                f"{'p_holm':>9s}  shape per chain")
+    for name in params:
+        d = per_param[name]
+        sh = ",".join(shapes[name])
+        pr = "n/a" if not np.isfinite(d["p_raw"]) else f"{d['p_raw']:.2e}"
+        ph = "n/a" if not np.isfinite(d["p_holm"]) else f"{d['p_holm']:.2e}"
+        c2 = "n/a" if not np.isfinite(d["chi2"]) else f"{d['chi2']:9.1f}"
+        flag = "" if not np.isfinite(d["p_holm"]) else \
+            ("  <- non-uniform" if d["p_holm"] < RANK_P_MIN else "")
+        rows.append(f"  {name:10s} {c2:>9s} {d['dof']:4d} {pr:>9s} {ph:>9s}  {sh}{flag}")
+
+    if np.any(np.isfinite(adj)):
+        w = int(np.nanargmin(adj))
+        worst_p, worst_param = float(adj[w]), params[w]
+        verdict = ("non-uniform -- chains disagree" if worst_p < RANK_P_MIN
+                   else "uniform (consistent with one distribution)")
+        rows.append(f"worst Holm-adjusted p = {worst_p:.2e} ({worst_param}) -> {verdict}")
+    else:
+        worst_p, worst_param = float("nan"), None
+        rows.append("worst Holm-adjusted p = n/a (not estimable)")
+    _emit("\n".join(rows))
+
+    return {"worst_p": worst_p, "worst_param": worst_param, "per_param": per_param,
+            "hist": hist_all, "thinned_hist": hist_thin, "shapes": shapes,
+            "n_chains": C, "n_thinned": n_thin if estimable else 0,
+            "label": label, "segmented": segmented}
+
+
+_RANK_COLOURS = ("#2c6fbb", "#d62728", "#e8a33d", "#2ca02c",
+                 "#8c564b", "#9467bd", "#17becf", "#7f7f7f")
+
+
+def plot_rank_hist(res, params, outpath) -> str:
+    '''Rank histograms: one panel per parameter, one step histogram per chain.
+
+    Uniform is the null. Bars are drawn from EVERY post-burn-in draw, so the curves are
+    smooth; the annotated p-value comes from the tau-thinned subsample instead, because
+    at this sample size autocorrelation makes visible wiggles untestable. A panel can
+    therefore look slightly uneven and still be consistent with uniformity -- read the
+    p, not the wiggle.'''
+    if not any(res["hist"][p].sum() for p in params if p in res["hist"]):
+        raise ValueError("no post-burn-in draws to rank (chain shorter than the discard)")
+    n = len(params)
+    ncol = min(3, n)
+    nrow = int(np.ceil(n / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 3.1 * nrow), squeeze=False)
+    C = res["n_chains"]
+    for i, name in enumerate(params):
+        ax = axes[i // ncol][i % ncol]
+        h = res["hist"][name]
+        B = h.shape[1]
+        centres = (np.arange(B) + 0.5) / B
+        for c in range(C):
+            tot = h[c].sum()
+            frac = h[c] / tot if tot else h[c]
+            ax.step(centres, frac * B, where="mid",
+                    color=_RANK_COLOURS[c % len(_RANK_COLOURS)], lw=1.4,
+                    label=f"{'seg' if res['segmented'] else 'ens'}{c}")
+        ax.axhline(1.0, color="k", ls="--", lw=1.0, alpha=0.6)
+        d = res["per_param"].get(name, {})
+        ph = d.get("p_holm", float("nan"))
+        ptxt = "p=n/a" if not np.isfinite(ph) else f"p={ph:.1e}"
+        bad = np.isfinite(ph) and ph < RANK_P_MIN
+        shapes = sorted({s for s in res["shapes"].get(name, []) if s not in ("uniform", "n/a")})
+        sub = ("  " + ",".join(shapes)) if shapes else ""
+        ax.set_title(f"{name}   {ptxt}{sub}", fontsize=9,
+                     color="#d62728" if bad else "k")
+        ax.set_xlim(0, 1)
+        # Zoom on the deviations. Anchoring at 0 wastes ~85% of the axis: the curves live
+        # within a few percent of 1, so a 0-based panel squashes exactly what is being
+        # judged. Symmetric about 1 so over- and under-density stay visually comparable.
+        dev = max(0.05, float(np.nanmax(np.abs(np.concatenate(
+            [h[c] / h[c].sum() * B - 1.0 for c in range(C) if h[c].sum()])))))
+        ax.set_ylim(1 - 1.15 * dev, 1 + 1.15 * dev)
+        ax.set_xlabel("normalised rank", fontsize=8)
+        ax.set_ylabel("density (1 = uniform)", fontsize=8)
+        ax.tick_params(labelsize=8)
+        ax.grid(alpha=0.3)
+    for j in range(n, nrow * ncol):
+        axes[j // ncol][j % ncol].axis("off")
+    axes[0][0].legend(fontsize=7, ncol=2, frameon=False)
+    fig.suptitle(f"rank statistic ({res['label']}) -- uniform if all chains sample the "
+                 f"same distribution; NOT simulation-based calibration", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.savefig(outpath, dpi=130)
+    plt.close(fig)
+    return outpath
+
+
+def plot_rank_ecdf(res, params, outpath) -> str:
+    '''Rank ECDF minus uniform, with a simultaneous confidence band [7].
+
+    The honest read of pass/fail: a curve leaving the band is a real departure. Built
+    from the TAU-THINNED sample, because the band construction assumes independent
+    draws -- fed all draws it would be ~sqrt(tau) too narrow and condemn everything.'''
+    from arviz.stats.ecdf_utils import ecdf_confidence_band
+
+    thin = res.get("thinned_hist") or {}
+    usable = [p for p in params if p in thin]
+    if not usable:
+        raise ValueError("no tau-independent sample: rank ECDF needs an estimable test")
+    n = len(usable)
+    ncol = min(3, n)
+    nrow = int(np.ceil(n / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 3.1 * nrow), squeeze=False)
+    C, ndraw = res["n_chains"], res["n_thinned"]
+    ev = np.linspace(0, 1, 101)
+    try:
+        lo, hi = ecdf_confidence_band(ndraw, ev, ev, prob=0.95, method="optimized")
+    except Exception:                      # optimiser can fail on small ndraw
+        lo, hi = ecdf_confidence_band(ndraw, ev, ev, prob=0.95, method="pointwise")
+    for i, name in enumerate(usable):
+        ax = axes[i // ncol][i % ncol]
+        ax.fill_between(ev, lo - ev, hi - ev, color="#6b6b6b", alpha=0.25,
+                        label="95% simultaneous" if i == 0 else None)
+        h = thin[name]
+        B = h.shape[1]
+        edges = np.arange(B + 1) / B
+        for c in range(C):
+            tot = h[c].sum()
+            ecdf = np.concatenate([[0.0], np.cumsum(h[c]) / tot]) if tot else np.zeros(B + 1)
+            ax.step(edges, ecdf - edges, where="post",
+                    color=_RANK_COLOURS[c % len(_RANK_COLOURS)], lw=1.3,
+                    label=f"{'seg' if res['segmented'] else 'ens'}{c}" if i == 0 else None)
+        ax.axhline(0.0, color="k", ls="--", lw=1.0, alpha=0.6)
+        ax.set_title(name, fontsize=9)
+        ax.set_xlim(0, 1)
+        ax.set_xlabel("normalised rank", fontsize=8)
+        ax.set_ylabel("ECDF - uniform", fontsize=8)
+        ax.tick_params(labelsize=8)
+        ax.grid(alpha=0.3)
+    for j in range(n, nrow * ncol):
+        axes[j // ncol][j % ncol].axis("off")
+    axes[0][0].legend(fontsize=7, ncol=2, frameon=False)
+    fig.suptitle(f"rank ECDF vs uniform ({res['label']}) -- {ndraw} tau-independent "
+                 f"draws/chain, 95% simultaneous band", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.savefig(outpath, dpi=130)
+    plt.close(fig)
+    return outpath
 
 
 def _emit_mode_occupancy(chains, params, discard, thin):
@@ -1061,9 +1494,32 @@ def _diagnose(args, paths):
     except Exception as exc:
         _emit(f"arviz R-hat/ESS skipped: {exc}", warn=True)
 
+    # Rank statistic (computational faithfulness) on ALL samples pooled. Same coordinates
+    # as the gating R-hat above -- the canonical fold -- so the two are read together:
+    # in raw coordinates the exact (M_1,M_2,mu) flip symmetry alone would force
+    # non-uniformity that means nothing.
+    rank_res = None
+    try:
+        canon_rank = all(n in params for n in ("M_1", "M_2", "mu"))
+        scope = ("time segments of one ensemble" if len(chains) == 1
+                 else f"{len(chains)} ensembles")
+        rank_res = rank_uniformity(chains, params, discard, max_tau,
+                                   label=f"all samples, {scope}"
+                                         + (", mu>=0 canonical" if canon_rank else ""),
+                                   canon=canon_rank)
+        for fn, base in ((plot_rank_hist, "rank_all.png"),
+                         (plot_rank_ecdf, "rank_ecdf_all.png")):
+            try:
+                _emit(f"wrote {os.path.basename(fn(rank_res, params, os.path.join(args.outdir, base)))}"
+                      f" -> {args.outdir}")
+            except Exception as exc:
+                _emit(f"{base} skipped: {exc}", warn=True)
+    except Exception as exc:
+        _emit(f"rank uniformity skipped: {exc}", warn=True)
+
     # Every criterion spelled out (requirement / why / this scan), then the verdict.
     _emit_criteria_table(rhat_res, n50_flags, [c.shape[0] for c in chains], all_tau_max,
-                         acc_means, discard, sug_max)
+                         acc_means, discard, sug_max, rank_res=rank_res)
     _emit_convergence_verdict(rhat_res, n50_flags, acc_means, max_tau)
 
     # optional ntuple bridge (shared writer; the only part that needs the package)

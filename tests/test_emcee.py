@@ -242,6 +242,214 @@ def test_a_healthy_chain_still_reports_numbers(diag):
     assert "not estimable" not in "\n".join(diag._REPORT)
 
 
+# ── rank statistic / computational faithfulness ─────────────────────────────────
+
+def _ens(nsteps=3000, nwalkers=8, ndim=3, shift=0.0, scale=1.0, seed=0):
+    '''One ensemble of iid draws; `shift`/`scale` perturb the first parameter only.'''
+    rng = np.random.default_rng(seed)
+    ch = rng.standard_normal((nsteps, nwalkers, ndim))
+    ch[:, :, 0] = ch[:, :, 0] * scale + shift
+    return ch
+
+
+def _ar1_ens(nsteps=4000, nwalkers=8, ndim=3, phi=0.98, seed=0):
+    '''Strongly autocorrelated ensemble, tau_int = (1+phi)/(1-phi) ~ 99 at phi=0.98.
+    Every walker of every ensemble is drawn from the SAME stationary distribution.'''
+    rng = np.random.default_rng(seed)
+    ch = np.empty((nsteps, nwalkers, ndim))
+    ch[0] = rng.standard_normal((nwalkers, ndim))
+    s = np.sqrt(1 - phi ** 2)
+    for i in range(1, nsteps):
+        ch[i] = phi * ch[i - 1] + s * rng.standard_normal((nwalkers, ndim))
+    return ch
+
+
+def _rank(diag, ens, max_tau=5.0, **kw):
+    diag._REPORT.clear()
+    return diag.rank_uniformity(ens, PARAMS3, 0, max_tau, "t", canon=False, **kw)
+
+
+def test_identical_ensembles_are_uniform(diag):
+    res = _rank(diag, [_ens(seed=s) for s in range(4)])
+    assert res["worst_p"] > diag.RANK_P_MIN, "chains from one distribution must pass"
+    assert all(s == "uniform" for sh in res["shapes"].values() for s in sh)
+    assert "uniform (consistent with one distribution)" in "\n".join(diag._REPORT)
+
+
+def test_autocorrelated_but_healthy_chains_do_not_fail(diag):
+    '''The regression that killed two earlier designs. These chains are strongly
+    autocorrelated (tau ~ 99) but all sample the same distribution, so the check MUST
+    pass. A chi-square over all 32k draws assuming independence rejects ~always
+    (statistic inflated ~17x); scaling it by ESS/N over-corrects by an order of
+    magnitude and then never rejects anything. Only thinning by tau is calibrated.'''
+    res = _rank(diag, [_ar1_ens(seed=s) for s in range(4)], max_tau=99.0)
+    assert res["worst_p"] > diag.RANK_P_MIN, (
+        f"autocorrelated-but-healthy chains flagged non-uniform (p={res['worst_p']:.2e}) "
+        f"-- the test is not accounting for correlation")
+
+
+def test_a_shifted_ensemble_is_caught_and_reads_as_a_location_shift(diag):
+    '''A location shift must be caught, and the LOCATION contrast must be the dominant
+    signature. Asserting the bare label "skewed-high" would be too strict: at a few
+    thousand draws a 0.6 sigma shift also moves the quadratic contrast past 3 sigma (a
+    shifted normal ranked against the pooled mixture is not a purely linear distortion),
+    so the honest label is "mixed" -- with location dominating, which is the real claim.'''
+    res = _rank(diag, [_ens(seed=0, shift=0.6)] + [_ens(seed=s) for s in (1, 2, 3)])
+    assert res["worst_p"] < diag.RANK_P_MIN
+    assert res["worst_param"] == "M_1", "the perturbed parameter must be the worst"
+    label, z_loc, z_dis = diag._rank_shape(res["thinned_hist"]["M_1"][0])
+    assert label in ("skewed-high", "mixed"), label
+    assert z_loc > 0, "the shifted ensemble must sit HIGH in the pooled ranks"
+    assert abs(z_loc) > abs(z_dis), "location must dominate for a pure location shift"
+    assert "non-uniform -- chains disagree" in "\n".join(diag._REPORT)
+
+
+def test_an_over_dispersed_ensemble_is_called_u_shaped(diag):
+    '''Chains here are MCMC replicates, not SBC refits, so a U-shape means this chain
+    is over-dispersed RELATIVE TO THE POOLED sample -- not that a posterior is narrow.'''
+    res = _rank(diag, [_ens(seed=0, scale=1.8)] + [_ens(seed=s) for s in (1, 2, 3)])
+    assert res["worst_p"] < diag.RANK_P_MIN
+    assert res["shapes"]["M_1"][0] == "U-shaped"
+    assert "inverted-U" in res["shapes"]["M_1"][1:], \
+        "the narrower chains must read as under-dispersed against the pooled sample"
+
+
+def test_unperturbed_parameters_stay_uniform(diag):
+    '''A localised problem must not smear across parameters.'''
+    res = _rank(diag, [_ens(seed=0, shift=0.6)] + [_ens(seed=s) for s in (1, 2, 3)])
+    for name in ("M_2", "mu"):
+        assert res["per_param"][name]["p_holm"] > diag.RANK_P_MIN
+        assert all(s == "uniform" for s in res["shapes"][name])
+
+
+def test_too_few_independent_draws_is_not_estimable(diag):
+    '''Never a spurious pass: the same fail-closed rule as the R-hat nan guard.'''
+    res = _rank(diag, [_ens(nsteps=40, nwalkers=2, seed=s) for s in range(4)],
+                max_tau=500.0)
+    assert not np.isfinite(res["worst_p"])
+    assert res["n_thinned"] == 0
+    txt = "\n".join(diag._REPORT)
+    assert "not estimable" in txt
+    assert "non-uniform" not in txt and "consistent with one distribution" not in txt
+
+
+def test_a_non_finite_draw_degrades_only_its_own_parameter(diag):
+    '''Ranking nan/inf would silently drop it into an arbitrary bin. Report that
+    parameter as unestimable and keep testing the others.'''
+    ens = [_ens(nsteps=2000, nwalkers=6, seed=s) for s in range(4)]
+    ens[0][5, 2, 1] = np.inf                      # poison one draw of M_2
+    res = _rank(diag, ens)
+    assert not np.isfinite(res["per_param"]["M_2"]["p_holm"])
+    assert res["shapes"]["M_2"] == ["n/a"] * 4
+    for name in ("M_1", "mu"):
+        assert np.isfinite(res["per_param"][name]["p_holm"]), \
+            f"{name} must still be tested when another parameter is poisoned"
+
+
+def test_a_single_ensemble_falls_back_to_time_segments(diag):
+    '''What every chain job's auto-run hits: one backend, so no independent replicates.
+    Splitting it in time makes this a stationarity check, and it must say so.'''
+    res = _rank(diag, [_ens(nsteps=6000, seed=0)])
+    assert res["segmented"] is True
+    assert res["n_chains"] == diag.RANK_SEGMENTS
+    assert res["worst_p"] > diag.RANK_P_MIN, "a stationary chain must not flag drift"
+
+
+def test_time_segments_detect_drift(diag):
+    '''A single ensemble that is still moving must be caught by the segment split.'''
+    ch = _ens(nsteps=6000, seed=0)
+    ch[:, :, 0] += np.linspace(0.0, 2.0, ch.shape[0])[:, None]   # steady drift
+    res = _rank(diag, [ch])
+    assert res["worst_p"] < diag.RANK_P_MIN
+    assert res["worst_param"] == "M_1"
+
+
+def test_holm_adjustment_is_monotone_and_bounded(diag):
+    p = [1e-6, 0.02, 0.3, 0.9, float("nan")]
+    adj = diag._holm(p)
+    finite = adj[:4]
+    assert np.all(np.diff(finite) >= 0), "step-down adjusted p must be non-decreasing"
+    assert np.all(finite <= 1.0) and np.all(finite >= np.asarray(p[:4]))
+    assert not np.isfinite(adj[4]), "nan in must stay nan out"
+
+
+def test_rank_shape_classifier_labels(diag):
+    B = diag.RANK_BINS
+    n = 4000
+    flat = np.full(B, n / B)
+    assert diag._rank_shape(flat)[0] == "uniform"
+    rising = np.linspace(0.5, 1.5, B); rising = rising / rising.sum() * n
+    assert diag._rank_shape(rising)[0] == "skewed-high"
+    falling = rising[::-1]
+    assert diag._rank_shape(falling)[0] == "skewed-low"
+    bowl = np.abs(np.linspace(-1, 1, B)) + 0.2; bowl = bowl / bowl.sum() * n
+    assert diag._rank_shape(bowl)[0] == "U-shaped"
+    assert diag._rank_shape(bowl.max() - bowl + 1e-9)[0] == "inverted-U"
+    assert diag._rank_shape(np.zeros(B))[0] == "n/a"
+
+
+def test_folded_blocks_does_not_mutate_caller_chains(diag):
+    '''Extends the guarantee rhat_ess already had, now that the fold is shared: mode
+    occupancy re-reads the raw signs after these calls, and abs() is not reversible.'''
+    ch = _two_lobe_chain()
+    before = ch.copy()
+    diag._folded_blocks([ch], PARAMS3, 0, 1, canon=True)
+    diag._folded_blocks([ch], PARAMS3, 0, 1, mag=True)
+    assert np.array_equal(ch, before)
+
+
+# ── criteria table ──────────────────────────────────────────────────────────────
+
+def _table(diag, rhat=1.01, ess=900, n50=(True,), acc=(0.3,), rank_res=None):
+    diag._REPORT.clear()
+    diag._emit_criteria_table({"worst_rhat": rhat, "min_ess_bulk": ess,
+                               "min_ess_tail": ess, "label": "L"},
+                              list(n50), [10000], [10.0], list(acc), 100, 10,
+                              rank_res=rank_res)
+    return "\n".join(diag._REPORT)
+
+
+def test_table_summary_block_reports_every_check(diag):
+    txt = _table(diag)
+    assert "SUMMARY" in txt and "hard 3/3 PASS" in txt
+    for name in ("chain length vs tau", "Gelman-Rubin R-hat", "bulk effective sample size",
+                 "mean acceptance fraction", "tail effective sample size", "burn-in adequacy"):
+        assert f"] {name}" in txt, f"{name} missing from the summary block"
+
+
+def test_table_gains_a_rank_row_when_the_check_ran(diag):
+    rank_res = {"worst_p": 1e-9, "worst_param": "meL", "n_chains": 4, "segmented": False,
+                "shapes": {"meL": ["U-shaped", "uniform", "uniform", "uniform"]}}
+    txt = _table(diag, rank_res=rank_res)
+    assert "7  rank uniformity" in txt
+    assert "4 advisory" in txt
+    assert "[non-uniform] rank uniformity" in txt
+    assert "meL" in txt and "U-shaped" in txt
+    assert "NOT simulation-based calibration" in txt, \
+        "the table must not let a reader mistake this for calibration evidence"
+
+
+def test_a_failing_rank_check_does_not_change_the_verdict(diag):
+    '''It is advisory: R-hat already gates inter-chain agreement.'''
+    rank_res = {"worst_p": 1e-30, "worst_param": "meL", "n_chains": 4,
+                "segmented": False, "shapes": {"meL": ["U-shaped"]}}
+    assert "3 hard" in _table(diag, rank_res=rank_res)
+    out = _run_verdict(diag, 1.01, 900, [True], [0.3], 10.0)
+    assert "CONVERGED" in out and "NOT CONVERGED" not in out
+
+
+def test_hard_verdicts_is_the_shared_source_of_truth(diag):
+    '''The table and the verdict must not be able to disagree. Both read _hard_verdicts,
+    so one changed threshold cannot update only one of them.'''
+    rows = diag._hard_verdicts({"worst_rhat": 2.0, "min_ess_bulk": 10}, [False])
+    assert [ok for _n, ok, _m in rows] == [False, False, False]
+    table = _table(diag, rhat=2.0, ess=10, n50=(False,))
+    verdict = _run_verdict(diag, 2.0, 10, [False], [0.3], 10.0)
+    assert "hard 0/3 PASS" in table
+    for _name, _ok, msg in rows:
+        assert msg in verdict, f"verdict lost the failure message {msg!r}"
+
+
 # ── HDF5 -> ntuple layout + collision guard ─────────────────────────────────────
 
 def _make_backend(path, nwalkers=6, ndim=2, nsteps=8):
