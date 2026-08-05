@@ -389,8 +389,22 @@ def suggested_burnin_from_logprob(log_prob):
 
 
 def plot_tau_vs_n(chain: np.ndarray, params, outpath: str):
-    '''emcee-tutorial convergence plot: tau estimate vs chain length N, per
-    parameter, against the N/50 line.'''
+    '''emcee-tutorial convergence plot: tau estimate vs chain length N per parameter
+    against the N/50 line, PLUS the same data as tau/N.
+
+    The second panel is the one to read, because the first is easy to misread. While
+    N < 50*tau the estimator is in its downward-biased regime: it can only accumulate
+    autocorrelation out to a window it can afford, and mean-subtracting a finite series
+    forces the estimated ACF negative at large lag (by O(tau/N)), capping the positive
+    area it can sum. The result is tau_hat ~ N/const for EVERY coordinate regardless of
+    its physics -- which on a log-log tau-vs-N plot looks like unbounded linear growth
+    and invites the conclusion that tau diverges and running longer cannot help.
+
+    Plotted as tau/N the artifact is unmistakable: a FLAT line means tau_hat is pinned to
+    the run length and is only a lower bound. Real convergence appears as the curve
+    peeling downward and crossing 1/50 -- which is exactly the N > 50*tau criterion, so
+    the horizontal reference line is the target rather than a diagonal to compare against.
+    '''
     nsteps = chain.shape[0]
     ns = np.unique(np.logspace(np.log10(max(10, nsteps // 100)),
                                np.log10(nsteps), 12).astype(int))
@@ -401,17 +415,28 @@ def plot_tau_vs_n(chain: np.ndarray, params, outpath: str):
             taus[i] = emcee.autocorr.integrated_time(chain[:n], tol=0)
         except Exception:
             pass
-    plt.figure(figsize=(7, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     for p in range(chain.shape[2]):
-        plt.loglog(ns, taus[:, p], "o-", ms=3, label=params[p])
-    plt.loglog(ns, ns / 50.0, "--k", label=r"$\tau = N/50$")
-    plt.xlabel("number of samples N")
-    plt.ylabel(r"$\tau$ estimate")
-    plt.legend(fontsize=7, ncol=2)
-    plt.title("Autocorrelation-time convergence")
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=120)
-    plt.close()
+        ax1.loglog(ns, taus[:, p], "o-", ms=3, label=params[p])
+        ax2.loglog(ns, taus[:, p] / ns, "o-", ms=3, label=params[p])
+    ax1.loglog(ns, ns / 50.0, "--k", label=r"$\tau = N/50$")
+    ax1.set_xlabel("number of samples N")
+    ax1.set_ylabel(r"$\tau$ estimate")
+    ax1.set_title("Autocorrelation-time convergence")
+    ax1.legend(fontsize=7, ncol=2)
+    ax1.grid(alpha=0.3, which="both")
+
+    ax2.axhline(1.0 / TAU_FACTOR, color="k", ls="--", lw=1.2,
+                label=fr"target $\tau/N = 1/{TAU_FACTOR}$")
+    ax2.set_xlabel("number of samples N")
+    ax2.set_ylabel(r"$\tau\,/\,N$")
+    ax2.set_title(fr"$\tau/N$: flat $\Rightarrow$ pinned to N (lower bound)"
+                  "\n" fr"must fall to $1/{TAU_FACTOR}$ to converge")
+    ax2.legend(fontsize=7, ncol=2)
+    ax2.grid(alpha=0.3, which="both")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=120)
+    plt.close(fig)
 
 
 # ── trace / logprob / corner ────────────────────────────────────────────────
