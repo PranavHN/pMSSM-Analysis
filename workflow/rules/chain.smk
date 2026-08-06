@@ -63,3 +63,54 @@ else:
         shell:
             "{RULE_SCRIPTS}/r3mg_batch.py chain {params.cfg} --scan_dir {params.sdir} "
             "--seed {params.seed} --manifest_out {output.manifest} --nworkers {threads}"
+
+    # ── pooled cross-ensemble diagnostics ───────────────────────────────────
+    # Each chain job diagnoses only ITS OWN backend, so every per-batch diag/ is
+    # single-ensemble and labels everything ens0. The authoritative numbers -- the
+    # raw / mu>=0-canonical / magnitude-fold R-hat blocks, the cross-seed rank
+    # statistic, the octant-occupancy spread and the pooled corner -- need all the
+    # backends at once. Within-ensemble R-hat must NOT be read as the verdict: the
+    # DE/snooker moves couple walkers, so it is only a lower bound (v3's
+    # within-ensemble canonical R-hat was 1.173 against v2's cross-ensemble ~1.9).
+    #
+    # Inputs are the NTUPLES, not the chain.h5 files: the backends are undeclared
+    # side-state with no producing rule, so listing them would fail at DAG build.
+    # The ntuples span the same DAG, and since resuming a batch rewrites its ntuple,
+    # a resume re-triggers this automatically.
+    #
+    # Deliberately NOT in rule all (see _final_targets in the Snakefile): a
+    # plotting/arviz hiccup must not fail an otherwise-complete production run,
+    # exactly as for the per-batch diagnostics. Ask for it by name:
+    #     pixi run smk ... <meta_parent>/r3mg/diag.<runid>
+    if BATCHES > 1:
+
+        rule chain_diag_all:
+            input:
+                ntuples = expand(f"{BATCH_PREFIX}.{{b}}/ntuple.{RUNID}.{{b}}.root",
+                                 b=range(BATCHES))
+            output:
+                diag = directory(f"{META}/diag.{RUNID}")
+            params:
+                pattern = f"{BATCH_PREFIX}.*/chain.h5"
+            # Peak is the unthinned pooled arviz object, ~ nseeds * nwalkers *
+            # (min_iter - discard) * ndim * 8 bytes, and each fold copies it (1.24 GB
+            # apiece for a 4 x 256 x 24k run, which took ~13 min). 32 GB leaves room;
+            # the chain rule's own allotment is sized for the sampler pool instead.
+            resources:
+                mem_mb = 32000,
+                runtime = 90
+            shell:
+                # Guard, not decoration: under htcondor scratch scan dirs, or a
+                # --publish without --keep_local, the backends are scattered across
+                # workers or already removed, and the glob would quietly match one
+                # file (or none) -- yielding a "cross-ensemble" report built from a
+                # single chain, which is exactly the misreading this rule exists to
+                # prevent.
+                "n=$(ls -1 {params.pattern} 2>/dev/null | wc -l); "
+                'if [ "$n" -lt 2 ]; then '
+                '  echo "chain_diag_all: $n backend(s) match {params.pattern}, need >= 2." >&2; '
+                '  echo "  All scan dirs must be readable from here: not the case for" >&2; '
+                '  echo "  htcondor scratch dirs, or --publish without --keep_local." >&2; '
+                "  exit 1; "
+                "fi; "
+                "emcee_diagnostics.py --glob '{params.pattern}' --outdir {output.diag}"

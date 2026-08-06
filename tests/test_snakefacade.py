@@ -351,3 +351,73 @@ def test_adding_publish_later_is_still_allowed(repo):
     '''Documented behaviour: an unpublished run can be published afterwards.'''
     fatal, _ = sf.check_run_meta(_meta(publish=False), _meta(publish=True))
     assert fatal == []
+
+
+# ── the detached orchestrator must outlive its launcher ────────────────────
+
+def test_detached_orchestrator_ignores_sigint(tmp_path):
+    '''run_detached exists to produce a process that OUTLIVES its launcher, so an
+    interrupt aimed at the launcher's process tree must not kill it.
+
+    Regression: start_new_session alone was not enough. On viper02 the orchestrator was
+    reproducibly killed by SIGINT within its first couple of seconds -- ~7 of 8 attempts,
+    from a tool and from an interactive shell alike -- always inside the slurm executor
+    plugin's module-scope `import pandas`. Every survivor had a launcher that outlived
+    that window. Six move/init trials had to be resubmitted by hand because of it.'''
+    import os, signal, subprocess, sys, time
+    from Run3ModelGen import snakefacade
+
+    script = tmp_path / "sleeper.py"
+    script.write_text("import time\n"
+                      "open(%r, 'w').close()\n"
+                      "time.sleep(30)\n" % str(tmp_path / "started"))
+    log = tmp_path / "log.txt"
+
+    pid = snakefacade.run_detached([sys.executable, str(script)], str(log))
+    try:
+        for _ in range(200):                       # wait for the child to be running
+            if (tmp_path / "started").exists():
+                break
+            time.sleep(0.05)
+        assert (tmp_path / "started").exists(), "child never started"
+
+        os.kill(pid, signal.SIGINT)
+        time.sleep(0.5)
+        # NOT os.kill(pid, 0): the child is our direct child, so when it dies it becomes
+        # a ZOMBIE until reaped, and signal 0 succeeds against a zombie -- the check
+        # would pass whether or not SIGINT was ignored. waitpid actually distinguishes.
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+        assert reaped == 0, (
+            f"orchestrator died on SIGINT (exit status {status}); a detached "
+            f"orchestrator must ignore interrupts aimed at its launcher")
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_detached_orchestrator_is_in_its_own_session(tmp_path):
+    '''The other half of the contract: no controlling terminal, so nothing the shell
+    sends to its foreground group reaches it either.'''
+    import os, signal, sys, time
+    from Run3ModelGen import snakefacade
+
+    script = tmp_path / "sid.py"
+    script.write_text("import os, time\n"
+                      "open(%r,'w').write(str(os.getsid(0)))\n"
+                      "time.sleep(30)\n" % str(tmp_path / "sid.txt"))
+    pid = snakefacade.run_detached([sys.executable, str(script)], str(tmp_path / "l.txt"))
+    try:
+        for _ in range(200):
+            if (tmp_path / "sid.txt").exists():
+                break
+            time.sleep(0.05)
+        child_sid = int((tmp_path / "sid.txt").read_text())
+        assert child_sid != os.getsid(0), "child must not share our session"
+        assert child_sid == pid, "child should be its own session leader"
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

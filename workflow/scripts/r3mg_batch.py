@@ -484,6 +484,21 @@ def publish(scan_dir, tar_file, runid, procid, marker, cleanup):
     if not cleanup:
         return
 
+    # An emcee backend is days of sampling and the chain rule RESUMES from it in place.
+    # Cleanup removes it along with everything else. That is not data loss -- tarball's
+    # staging walk excludes only SModelS_xsec/ and dag.{dot,svg}, so chain.h5 travels
+    # inside the published tarball -- but it does end in-place resumability, and the
+    # recovery path (fetch + untar) is not obvious from the log. Say so explicitly
+    # rather than let it read as a routine disk-space message.
+    backend = os.path.join(scan_dir, "chain.h5")
+    if os.path.exists(backend):
+        log.warning(
+            f"cleanup is removing {backend} ({os.path.getsize(backend) / 1e9:.2f} GB of "
+            f"sampler state). It IS preserved inside {os.path.basename(tar_file)} on EOS, "
+            f"but this ensemble can no longer be resumed in place: to add iterations you "
+            f"must fetch that tarball and restore chain.h5 to the scan dir first. Use "
+            f"--keep_local to publish without removing the local copy.")
+
     freed = sum(os.path.getsize(os.path.join(root, f))
                 for root, _, files in os.walk(scan_dir) for f in files)
     freed += os.path.getsize(tar_file) if os.path.isfile(tar_file) else 0

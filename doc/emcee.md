@@ -140,10 +140,17 @@ The `chain` rule is grouped as one long (23 h) SLURM job per ensemble and reques
 `mcmc.nworkers` CPUs. Its memory request defaults to `2000 MB × nworkers`; override
 with `--set-resources chain:mem_mb=<n>` (`0` = whole node) for a wide (128-worker)
 run. Re-run the same command (or add `--forcerun chain`) to resume ensembles that
-haven't converged. **Publishing** (`--publish eos`) *moves* the ROOT ntuple off-node
-but leaves `chain.h5` in the local scan dir, so a published ensemble can still be
-resumed to add iterations — a re-run regenerates and re-publishes the ntuple. See
-`doc/snakemake.md` for the facade/backends and `--publish` details.
+haven't converged.
+
+**Publishing** (`--publish eos`) *moves* the run to EOS: without `--keep_local` the
+publish step removes each batch's scan dir once its copies verify, and that includes
+`chain.h5`. The sampler state is not lost — `tarball` stages the whole scan dir except
+`SModelS_xsec/` and `dag.{dot,svg}`, so the backend travels inside the published tarball
+— but **a published ensemble can no longer be resumed in place**. To add iterations you
+must fetch the tarball and restore `chain.h5` to the scan dir first. Pass `--keep_local`
+to publish while keeping the local copy resumable. (This paragraph previously claimed
+publishing left `chain.h5` behind; it does not.) See `doc/snakemake.md` for the
+facade/backends and `--publish` details.
 
 ## Reproducibility & seeding
 

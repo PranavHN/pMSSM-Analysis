@@ -286,3 +286,42 @@ def test_smodels_step_is_serialised_against_concurrent_batches(repo):
         profile = _yaml.safe_load(f)
     assert "smodels_db=1" in [str(r) for r in profile.get("resources", [])], \
         "the local profile must limit smodels_db to 1, otherwise the token is unbounded"
+
+
+# ── pooled cross-ensemble diagnostics ──────────────────────────────────────
+
+def test_pooled_diag_rule_exists_and_stays_out_of_the_default_target(repo):
+    '''chain_diag_all pools the per-seed backends for the AUTHORITATIVE numbers (cross-
+    ensemble R-hat, the cross-seed rank statistic, octant spread), because each chain job
+    only ever sees its own chain.h5 and its diag/ is therefore single-ensemble.
+
+    Two properties matter and neither is obvious from reading the rule alone:
+      * it must NOT be a default target -- an arviz/plotting hiccup must not fail an
+        otherwise-complete production run, the same contract the per-batch diagnostics
+        already have (they are best-effort inside r3mg_batch.py);
+      * it must take the NTUPLES as input, never chain.h5, which is undeclared
+        side-state with no producing rule -- listing it would fail at DAG build.
+    '''
+    smk = (repo / "workflow" / "rules" / "chain.smk").read_text()
+    assert "rule chain_diag_all:" in smk
+    body = smk.split("rule chain_diag_all:")[1]
+    assert "ntuple" in body.split("output:")[0], "must depend on the ntuples"
+    assert "chain.h5" not in body.split("output:")[0], \
+        "must NOT declare chain.h5 as an input (undeclared side-state)"
+    assert "emcee_diagnostics.py" in body
+
+    snakefile = (repo / "workflow" / "Snakefile").read_text()
+    targets = snakefile.split("def _final_targets")[1].split("rule all")[0]
+    assert "diag_all" not in targets and "chain_diag_all" not in targets, \
+        "chain_diag_all must not be wired into the default target"
+
+
+def test_pooled_diag_refuses_a_single_backend(repo):
+    '''Under htcondor scratch scan dirs, or --publish without --keep_local, the backends
+    are scattered across workers or already gone. The glob would then match one file and
+    silently produce a "cross-ensemble" report built from a single chain -- precisely the
+    misreading this rule exists to prevent -- so it must fail instead.'''
+    smk = (repo / "workflow" / "rules" / "chain.smk").read_text()
+    body = smk.split("rule chain_diag_all:")[1]
+    assert "-lt 2" in body, "must require at least two backends"
+    assert "exit 1" in body, "must fail rather than diagnose one chain as if pooled"

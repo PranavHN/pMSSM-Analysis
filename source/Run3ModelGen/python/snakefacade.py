@@ -20,6 +20,7 @@ import getpass
 import hashlib
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -165,9 +166,25 @@ def run_detached(argv: list, logfile: str, warn=None) -> int:
         for message in linger_warnings():
             warn(message)
     os.makedirs(os.path.dirname(os.path.abspath(logfile)), exist_ok=True)
+
+    def _detach():
+        # start_new_session already puts the orchestrator in its own session with no
+        # controlling terminal, so no TERMINAL-generated signal can reach it. That was
+        # not enough: on viper02 the orchestrator was killed by SIGINT during its first
+        # couple of seconds -- reproducibly, ~7 of 8 attempts, from a tool AND from an
+        # interactive shell -- always inside the slurm executor plugin's module-scope
+        # `import pandas`. Every survivor had a parent that outlived that window; every
+        # casualty had a parent that exited during it. So the interrupt is aimed at the
+        # launcher's process tree and lands on the freshly-spawned child before it is
+        # reparented away. An orchestrator that exists precisely to outlive its launcher
+        # has no business dying on that, so ignore it. SIGHUP too, for logout.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
     with open(logfile, 'ab') as lf:
         proc = subprocess.Popen(argv, stdout=lf, stderr=lf,
-                                start_new_session=True, cwd=os.getcwd())
+                                start_new_session=True, cwd=os.getcwd(),
+                                preexec_fn=_detach)
     return proc.pid
 
 

@@ -268,3 +268,59 @@ def test_marker_is_written_without_cleanup_too(batch, tmp_path, monkeypatch):
 
     assert res.exit_code == 0, res.output
     assert marker.is_file() and scan.is_dir() and tar.is_file()
+
+
+# ── the emcee backend and cleanup ──────────────────────────────────────────
+
+def test_cleanup_warns_loudly_when_it_removes_an_emcee_backend(batch, tmp_path,
+                                                               monkeypatch, caplog):
+    '''chain.h5 is days of sampling and the chain rule resumes from it IN PLACE, so
+    cleanup ending that has to be stated, not buried in a disk-space line.
+
+    Not data loss -- tarball's staging walk excludes only SModelS_xsec/ and
+    dag.{dot,svg}, so the backend rides along inside the published tarball -- but the
+    recovery path (fetch + untar + restore) is not guessable from the old log, and
+    doc/emcee.md used to claim outright that publishing left chain.h5 behind.'''
+    import logging
+    scan, tar = _make_batch_dir(tmp_path)
+    (scan / "chain.h5").write_bytes(b"x" * 4096)
+    eos = tmp_path / "eos"
+    monkeypatch.setenv("EOSPATH", str(eos))
+
+    with caplog.at_level(logging.WARNING):
+        res = _run_publish(batch, scan, tar, eos)
+
+    assert res.exit_code == 0, res.output
+    assert not scan.exists()
+    txt = caplog.text
+    assert "chain.h5" in txt, "the warning must name the backend"
+    assert "resumed in place" in txt or "resume" in txt
+    assert "--keep_local" in txt, "it must point at the way to avoid this"
+
+
+def test_cleanup_is_silent_about_backends_for_a_non_mcmc_scan(batch, tmp_path,
+                                                              monkeypatch, caplog):
+    '''A flat/grid batch has no chain.h5; the warning must not fire for it.'''
+    import logging
+    scan, tar = _make_batch_dir(tmp_path)
+    eos = tmp_path / "eos"
+    monkeypatch.setenv("EOSPATH", str(eos))
+
+    with caplog.at_level(logging.WARNING):
+        res = _run_publish(batch, scan, tar, eos)
+
+    assert res.exit_code == 0, res.output
+    assert "chain.h5" not in caplog.text
+
+
+def test_keep_local_leaves_the_backend_resumable(batch, tmp_path, monkeypatch):
+    '''--keep_local is the documented way to publish an emcee run and still resume.'''
+    scan, tar = _make_batch_dir(tmp_path)
+    (scan / "chain.h5").write_bytes(b"x" * 4096)
+    eos = tmp_path / "eos"
+    monkeypatch.setenv("EOSPATH", str(eos))
+
+    res = _run_publish(batch, scan, tar, eos, cleanup=False)
+
+    assert res.exit_code == 0, res.output
+    assert (scan / "chain.h5").is_file(), "the backend must survive --keep_local"
