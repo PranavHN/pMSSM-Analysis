@@ -110,6 +110,31 @@ Nothing in it touches xrootd; it is separate because graphviz and xrootd cannot 
 
 Both `rootenv` and `dagviz` are defined with `no-default-feature = true`, so they are fully independent of the default environment and resolve quickly. For more details on the environments, see [doc/pixi.md](doc/pixi.md).
 
+### Optional: detach the environments from the project directory
+
+By default pixi materialises each environment under `.pixi/envs` inside the project. Conda-style environments consist of very many small files, so if the project lives on a filesystem with a file-count (inode) quota, the environments are usually what exhausts it — long before disk space runs out. The symptom is easy to misread: plenty of free space, but every write fails with `Quota exceeded`.
+
+`detached-environments` moves them elsewhere. It is a *global* setting, written to `~/.pixi/config.toml`, so one command covers every project on the machine:
+
+```bash
+pixi config set detached-environments /path/to/roomy/filesystem/pixi-envs
+pixi install
+pixi run python -c 'import sys; print(sys.executable)'
+```
+
+The interpreter should now be under the new location. `pixi install` returning without re-solving confirms the relocated environment satisfies `pixi.lock`, so it is the same environment as before.
+
+Then reclaim the old copy and let pixi restore the path:
+
+```bash
+rm -rf .pixi/envs && pixi install
+ls -ld .pixi/envs                  # expect a symlink to the new location
+```
+
+pixi recreates `.pixi/envs` as a **symlink**, which is what makes this safe to retrofit into an existing setup: scripts that hardcode `.pixi/envs/default/bin/python` keep working through the link.
+
+Two caveats. If the new location is a scratch filesystem, check its purge policy first — an environment left untouched long enough can be deleted, needing `pixi install` again, and once several projects point at the same place one purge takes out all of them. On a cluster, the new location must also be readable from the batch nodes, not just the login node. Finally, do not run the `rm -rf` step while a scan is running: model generation shells out through `pixi run` on every iteration, so the environment is in use for the whole job even though the submit scripts never mention pixi.
+
 # On startup
 
 As perviously mentioned, pixi should be ready to use as per your `.bash_profile`, so there is no need to do anything here.
