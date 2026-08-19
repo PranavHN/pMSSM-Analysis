@@ -836,12 +836,40 @@ def readModel(inputDefinitions: list[tuple], num: int, scanDir: str, outName: st
             # save theory prediction & (exp) UL:
             try:
                 expt_results = smodels_dict['smodelsOutput']['ExptRes']
+                # An analysis appears once per signal region / dataset, so keying
+                # the branches on AnalysisID alone made every entry overwrite the
+                # previous one and the ntuple kept whichever came LAST. Measured on
+                # real output: 50 of 116 analyses in one point carried more than one
+                # entry (up to nine), and the entry that set bestExpR survived for
+                # only 8 of 19 points. The stored branches then contradicted
+                # bestExpR_r_expected, sometimes with an ExpUpperLimit of None or -1
+                # overwriting a valid one, so the winning analysis could not be
+                # identified from the ntuple at all.
+                #
+                # Keep the entry that MAXIMISES r_expected per analysis, which is the
+                # one bestExpR selects over, falling back to the last entry when no
+                # entry has an expected r. Also store the per-analysis r and
+                # r_expected, so that
+                #     max over analyses of {AnalysisID}_r_expected == bestExpR_r_expected
+                # holds exactly and its argmax names the analysis responsible.
+                per_analysis = {}
                 for res in expt_results:
                     AnalysisID = res['AnalysisID'].replace("-", "_")
-
+                    prev = per_analysis.get(AnalysisID)
+                    if prev is None:
+                        per_analysis[AnalysisID] = res
+                        continue
+                    new_r, prev_r = res.get('r_expected'), prev.get('r_expected')
+                    if prev_r is None or (new_r is not None and new_r > prev_r):
+                        per_analysis[AnalysisID] = res
+                for AnalysisID, res in per_analysis.items():
                     data[f"{prefix}{AnalysisID}_TheoryPrediction"] = res['theory prediction (fb)']
                     data[f"{prefix}{AnalysisID}_UpperLimit"] = res['upper limit (fb)']
                     data[f"{prefix}{AnalysisID}_ExpUpperLimit"] = res['expected upper limit (fb)']
+                    if res.get('r') is not None:
+                        data[f"{prefix}{AnalysisID}_r"] = res['r']
+                    if res.get('r_expected') is not None:
+                        data[f"{prefix}{AnalysisID}_r_expected"] = res['r_expected']
 
                 # Analysis with the lowest expected upper limit (most sensitive):
                 best_res = min(
