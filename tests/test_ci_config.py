@@ -318,6 +318,22 @@ def test_smodels_step_is_serialised_against_concurrent_batches(repo):
 
 # ── pooled cross-ensemble diagnostics ──────────────────────────────────────
 
+def test_active_learning_gpu_is_requested_through_the_plugin_resource(repo):
+    '''The slurm executor plugin refuses a --gres inside slurm_extra, and its error
+    handler then crashes on group jobs, so the refusal is swallowed and the orchestrator
+    waits forever at "Execute 1 jobs..." with nothing in the log (plugin 2.7.1, measured
+    on a real submission). The GPU must go through the plugin's `gpu` resource.'''
+    import yaml as _yaml
+
+    with open(repo / "workflow" / "profiles" / "slurm" / "config.yaml") as f:
+        profile = _yaml.safe_load(f)
+    al = profile["set-resources"]["active_learning"]
+    assert "gres" not in str(al.get("slurm_extra", "")), "never --gres via slurm_extra (silent hang)"
+    assert al.get("gpu") == 1, "the GPU request is the plugin's gpu resource"
+    assert "active_learning=batch" in [str(g) for g in profile["groups"]], \
+        "the rule must be grouped like the other per-batch rules"
+
+
 def test_pooled_diag_rule_exists_and_stays_out_of_the_default_target(repo):
     '''chain_diag_all pools the per-seed backends for the AUTHORITATIVE numbers (cross-
     ensemble R-hat, the cross-seed rank statistic, octant spread), because each chain job

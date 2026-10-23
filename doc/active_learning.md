@@ -136,7 +136,7 @@ Only *valid* models (target window and every veto) enter the training set.
 
 ```bash
 # single scan dir, one GPU job on SLURM (the slurm profile puts the active_learning rule
-# on the apu1 partition with --gres=gpu:1; adapt workflow/profiles/slurm/config.yaml)
+# on the apu1 partition with one GPU (`gpu: 1`); adapt workflow/profiles/slurm/config.yaml)
 pixi run -e rocm genModels.py --config_file al.yaml --scan_dir /ptmp/$USER/al_run --backend slurm
 
 # K independent scans with their own seeds (scan.<runid>.<b>), e.g. for seed averages

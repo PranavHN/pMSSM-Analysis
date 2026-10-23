@@ -69,8 +69,8 @@ def require_gpu():
     if not torch.cuda.is_available():
         log.fatal("FATAL: no GPU is visible to PyTorch (torch.cuda.is_available() is False). "
                   "prior: active_learning has no CPU mode: run it on a GPU node "
-                  "(--backend slurm with the active_learning rule's --gres=gpu:1, or a GPU "
-                  "machine for --backend local).")
+                  "(--backend slurm, whose profile requests a GPU for the active_learning "
+                  "rule, or a GPU machine for --backend local).")
         sys.exit(1)
     return torch.device("cuda")
 

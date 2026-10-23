@@ -71,8 +71,13 @@ set-resources:
     # the worker count; partition and GPU request are site settings (MPCDF viper: the
     # shared `apu1` partition, one of the node's two MI300A GPUs). The loop checkpoints
     # and resumes, so the 24 h limit is not a cap on the scan length.
+    #
+    # The GPU goes through the plugin's own `gpu` resource (-> sbatch --gpus=1). NOT via
+    # slurm_extra: the plugin refuses a --gres there, and — because its error handler
+    # then trips over group jobs — the refusal is swallowed and the orchestrator waits
+    # forever at "Execute 1 jobs..." with nothing in the log (plugin 2.7.1, measured).
     slurm_partition: "'apu1'"
-    slurm_extra: "'--gres=gpu:1'"
+    gpu: 1
     runtime: 1380
 
 set-threads:
