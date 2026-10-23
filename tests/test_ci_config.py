@@ -270,6 +270,13 @@ def test_active_learning_rule_body_is_referenced_by_the_rule(repo):
     assert "r3mg_batch.py active_learning" in smk
     body = (repo / "workflow" / "scripts" / "r3mg_batch.py").read_text()
     assert "def active_learning(" in body
+    # click derives "active-learning" from the function name unless the command is
+    # named; the rule calls the underscore spelling (caught by a real local run).
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("r3mg_batch", repo / "workflow" / "scripts" / "r3mg_batch.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert "active_learning" in mod.cli.commands, sorted(mod.cli.commands)
 
 
 def test_offline_checks_fail_fast(checks_script):

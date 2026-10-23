@@ -327,7 +327,9 @@ def chain(config_file, scan_dir, seed, manifest_out, nworkers):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-@cli.command()
+# Named explicitly: click would otherwise derive "active-learning" from the function
+# name, and the rule invokes "r3mg_batch.py active_learning".
+@cli.command("active_learning")
 @click.option('--config_file', default=None)
 @click.option('--scan_dir', required=True, type=str)
 @click.option('--seed', required=True, type=int)
