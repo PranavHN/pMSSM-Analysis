@@ -146,6 +146,16 @@ pixi run -e rocm genModels.py --config_file al.yaml --scan_dir /ptmp/$USER/al_ru
 pixi run -e rocm genModels.py --config_file al.yaml --scan_dir al_run
 ```
 
+To run on another partition for a quick test, override the rule's resources on the
+command line of the underlying `snakemake` call (the resume command `genModels.py`
+prints), and repeat the GPU request: a command-line `--set-resources` replaces the
+profile's whole entry for that rule, so `gpu=1` must be given again or the GPU
+partition rejects the job (`QOSMinGRES`):
+
+```bash
+snakemake ... --set-resources "active_learning:slurm_partition='apudev'" active_learning:runtime=14 active_learning:gpu=1
+```
+
 Resources: the rule requests `nworkers` CPUs and `nworkers * 2000 + 8000` MB
 (SModelS in the steps needs more: every worker loads the 1.4 GB results database;
 `--set-resources active_learning:mem_mb=<n>`). A full run of 40 iterations with 500
