@@ -125,9 +125,15 @@ sample  →  prep_input → SPheno → softsusy → micromegas → superiso
   cannot be decomposed into per-tool rules. The chain checkpoints to `chain.h5`
   (undeclared side-state), so a re-run resumes an unconverged chain rather than
   wiping it — see [doc/emcee.md](emcee.md).
+- `prior: active_learning` likewise runs as **one opaque `active_learning` rule per
+  batch**, in the GPU pixi environment the config names (`active_learning.environment`):
+  the surrogate loop labels every batch inside the job. It checkpoints to `al_state.pt`
+  and its `iteration_NNN/` dirs (undeclared side-state) and resumes from them; a
+  wall-clock stop exits 3 without the ntuple so a re-run continues — see
+  [doc/active_learning.md](active_learning.md).
 
 Rule bodies live in `workflow/scripts/r3mg_batch.py` (internal CLI:
-`sample|step|ntuple|chain|tarball|publish`; invoked by path from the rules, never
+`sample|step|ntuple|chain|active_learning|tarball|publish`; invoked by path from the rules, never
 by hand — it is deliberately not on `PATH`);
 every rule shell first sources `build/setup.sh`, reproducing the legacy condor
 worker environment on all executors. Bookkeeping (per-step manifests, markers)

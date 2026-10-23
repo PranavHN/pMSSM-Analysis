@@ -10,7 +10,7 @@ All scan parameters are controlled via YAML config files. When `genModels.py` is
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `prior` | string | `flat` | Sampling method: `flat`, `fixed`, `mcmc`, `grid`, or `importance`. |
+| `prior` | string | `flat` | Sampling method: `flat`, `fixed`, `mcmc`, `grid`, `importance`, or `active_learning`. |
 | `num_models` | int | `20` | Number of models to generate (max 10,000 per job). |
 | `isGMSB` | bool | `False` | Enable GMSB-specific parameter handling. |
 | `parameters` | dict | See default | pMSSM parameter ranges (flat/mcmc) or fixed values (fixed). |
@@ -19,6 +19,8 @@ All scan parameters are controlled via YAML config files. When `genModels.py` is
 | `constraints` | list | `[]` | Physics constraints for the MCMC likelihood. See [doc/constraints.md](constraints.md). |
 | `grid` | dict | `{}` | Grid axis definitions. Only used when `prior: grid`. Maps parameter names to lists of values. |
 | `importance` | dict | `{}` | Importance sampling settings. Only used when `prior: importance`. See [Importance](#importance) section. |
+| `active_learning` | dict | See default | Surrogate loop settings. Only used when `prior: active_learning`. See [Active learning](#active-learning) and [doc/active_learning.md](active_learning.md). |
+| `tool_timeout` | float | unset | Seconds per external tool call (`mcmc` and `active_learning`); a timed-out tool fails that model. |
 
 ### Parameter specification
 
@@ -205,6 +207,33 @@ Key differences from other priors:
 - The 10,000-model-per-job cap applies.
 - Like `flat` and `grid`, the pipeline runs after all models are sampled.
 
+### Active learning
+
+Runs the surrogate-guided loop on a GPU: label a uniform seed set, train a surrogate on
+the labelled models, score candidates, select `num_models` by an acquisition rule, label
+them, repeat for `active_learning.n_iterations`. Every key of the loop lives in the
+`active_learning` block (defaults in `default_config.yaml`; nested keys merge); the
+`parameters` block is the sampling box (fixed parameters `[v, v]` are not learned).
+The block names the GPU pixi environment the loop runs in (`environment: rocm | cuda`);
+the default environment is refused with a FATAL message. Full key reference and output
+layout: [doc/active_learning.md](active_learning.md).
+
+```yaml
+prior: active_learning
+num_models: 500
+active_learning:
+  environment: rocm
+  model: transformer       # transformer | dnn | exact_gp | deep_gp
+  head: classification     # classification | regression
+  strategy: cls_entropy    # classification: cls_entropy; regression: entropy_batch | tol_only_random
+  seed_models: 2000
+  n_iterations: 40
+  target: {branch: MO_Omega, value: 0.12, transform: log, valid: {lo: 0.0, hi: 1.0}, hit_tolerance: 0.10}
+  vetoes:
+    - {branch: SP_m_h, lo: 0.0}
+    - {branch: SP_LSP_type, lo: 0.5, hi: 3.5}
+```
+
 ## Config file location
 
 Config files are stored in `source/Run3ModelGen/data/configs/`:
@@ -217,6 +246,10 @@ Config files are stored in `source/Run3ModelGen/data/configs/`:
 | `example_mcmc_config.yaml` | Example MCMC config with 4 physics constraints. |
 | `example_grid_config.yaml` | Example grid prior config with 3 grid axes. |
 | `example_importance_config.yaml` | Example importance sampling config with seed CSV. |
+| `example_active_learning_config.yaml` | Active learning on the relic density: transformer, classification, entropy (the default). |
+| `example_active_learning_regression.yaml` | Active learning on the relic density: deep GP, regression, entropy batch, warm start. |
+| `example_active_learning_exclusion.yaml` | Active learning on the SModelS exclusion: DNN, regression, tolerance cut + random draw. |
+| `ci_active_learning_config.yaml` | Tiny active-learning config for the DAG dry-run and the GPU smoke test. |
 
 ## genConfig.py
 
@@ -228,6 +261,7 @@ genConfig.py mcmc --output_dir myrun/  # Copies example_mcmc_config.yaml to myru
 genConfig.py fixed                     # Copies example_fixed_config.yaml to current dir
 genConfig.py grid                      # Copies example_grid_config.yaml to current dir
 genConfig.py importance                # Copies example_importance_config.yaml to current dir
+genConfig.py active_learning           # Copies example_active_learning_config.yaml to current dir
 ```
 
 ### Usage
@@ -236,7 +270,7 @@ genConfig.py importance                # Copies example_importance_config.yaml t
 genConfig.py PRIOR [--output_dir DIR]
 
 Arguments:
-  PRIOR       The prior type: flat, fixed, mcmc, grid, or importance
+  PRIOR       The prior type: flat, fixed, mcmc, grid, importance, or active_learning
 
 Options:
   --output_dir  Directory to save the config file (default: current directory)

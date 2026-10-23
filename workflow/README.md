@@ -16,6 +16,7 @@ workflow/
 │   ├── warmup.smk         warm_pythia8, warm_smodels_db          (localrules, always included)
 │   ├── generate.smk       sample, step, ntuple                   (point-sampled priors)
 │   ├── chain.smk          chain                                  (prior: mcmc)
+│   ├── active_learning.smk active_learning                       (prior: active_learning)
 │   ├── publish.smk        tarball, publish                       (mode=batch, publish=eos)
 │   └── extract.smk        extract_batch, extract_all             (mode=extract)
 ├── scripts/
@@ -33,6 +34,7 @@ Which `.smk` files get included is decided in
 | - | - | - |
 | `single` / `batch` | `flat`, `fixed`, `grid`, `importance` | `warmup` + `generate` + `publish` |
 | `single` / `batch` | `mcmc` | `warmup` + `chain` + `publish` |
+| `single` / `batch` | `active_learning` | `warmup` + `active_learning` + `publish` (rule shells in the GPU env named by the config) |
 | `extract` | — | `extract` only |
 
 `publish.smk` and `chain.smk` are always *included* but their rules are guarded
@@ -48,11 +50,12 @@ by `if MODE == ...`, so they contribute nothing to the DAG outside their mode.
 | `step` | generate.smk | `scan`, `step` | `r3mg/<scan>/step_<step>.json` |
 | `ntuple` | generate.smk | `b` (batch mode) | `<scan_dir>/ntuple.<C>.<P>.root` |
 | `chain` | chain.smk | `b` (batch mode) | ntuple + `r3mg/<scan>/chain.json` |
+| `active_learning` | active_learning.smk | `b` (batch mode) | ntuple + `r3mg/<scan>/active_learning.json` + `<scan_dir>/diag` |
 | `tarball` | publish.smk | `b` | `scan.<runid>.<b>.tar.gz` |
 | `publish` | publish.smk | `b` | `r3mg/<scan>/published.ok` (also *deletes* the scan dir + tarball unless `keep_local`) |
 | `extract_batch` | extract.smk | `p` (ProcId) | `r3mg_extract/<C>.<p>.ok` |
 
-`ntuple` and `chain` each exist in two variants (`if MODE == "single"` / `else`)
+`ntuple`, `chain` and `active_learning` each exist in two variants (`if MODE == "single"` / `else`)
 because the single-mode paths are constants while batch mode carries a `b`
 wildcard — same body, different signature.
 
@@ -76,7 +79,8 @@ not on `PATH` — it is not a user entrypoint.
 | `sample` | `--scan_dir --seed --points_out` | wipes + recreates the scan dir, samples all points, dumps `scan_config.yaml` and the points `.npz` |
 | `step` | `--step --scan_dir --points --manifest_out` (`--prev_manifest`) | runs one tool over the models gated by the previous manifest, writes this step's manifest |
 | `ntuple` | `--scan_dir --points` | re-prints the per-step summary, then `mkntuple()` |
-| `chain` | `--scan_dir --seed --manifest_out` | one whole MH scan as a single opaque job |
+| `chain` | `--scan_dir --seed --manifest_out` | one whole emcee scan as a single opaque job |
+| `active_learning` | `--scan_dir --seed --manifest_out` (`--nworkers --batch_index`) | one whole active-learning scan as a single opaque GPU job; resumes from `al_state.pt`; exits 3 without outputs on a wall-clock stop |
 | `tarball` | `--scan_dir --tar_out` | hardlink-stages the tree, folds `SModelS_xsec/` back over `SPheno/`, tars |
 | `publish` | `--scan_dir --tarball --runid --procid` (`--cleanup`) | `cp` (or `xrdcp` for `root://`) to `$EOSPATH/<runid>/<procid>/`; with `--cleanup`, verifies every destination's size and then removes the local scan dir + tarball |
 
@@ -142,8 +146,11 @@ Four constraints that are easy to break and expensive to debug:
 
 There are no per-rule `conda:` or `container:` directives. Every rule shell gets
 the repo's prebuilt pixi env by absolute path plus `build/setup.sh`, via the
-single `shell.prefix` at [Snakefile:58-59](Snakefile#L58-L59); this assumes the
-checkout and its `.pixi/` sit on a filesystem the workers can see. See
+single `shell.prefix` in the Snakefile; this assumes the checkout and its `.pixi/`
+sit on a filesystem the workers can see. The env is the default one, except for
+`prior: active_learning`, where the Snakefile reads `active_learning.environment`
+(`rocm` | `cuda`) from the config at parse time and points `ENV_BIN` (and the warm-up
+flag dir, `build/.warm-<env>`) at that environment for the whole DAG. See
 [doc/pixi.md](../doc/pixi.md).
 
 ## Editing checklist

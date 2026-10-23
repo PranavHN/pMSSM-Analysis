@@ -41,7 +41,7 @@ For alternative installation methods (Homebrew, Windows, etc.), see the [pixi in
 
 ## Environments
 
-Run3ModelGen defines three pixi environments:
+Run3ModelGen defines three pixi environments for the standard scans, and two GPU environments for `prior: active_learning`:
 
 ### Default environment
 
@@ -109,6 +109,29 @@ trade is not worth a rendered graph.
 `pixi install -a` installs it with everything else; on its own it is
 `pixi install -e dagviz` (once per machine/checkout). Without it, runs still
 write `dag.dot` and simply skip the SVG.
+
+### `rocm` and `cuda` environments (active learning only)
+
+`prior: active_learning` trains a surrogate on a GPU and labels its selections with
+the pipeline in the same job, so it needs the physics tools *and* `torch`/`gpytorch`
+in one environment. `rocm` (AMD, e.g. MPCDF viper's MI300A nodes) and `cuda` (NVIDIA)
+are therefore **supersets of the default environment** (the default feature plus the
+GPU packages), linux-64 only:
+
+```bash
+pixi install -e rocm        # ~25 GB: the ROCm torch wheels bundle the ROCm libraries
+pixi run -e rocm build      # the build is environment-independent; once is enough
+pixi run -e rocm genModels.py --config_file al.yaml --scan_dir ... --backend slurm
+```
+
+`rocm` takes torch from the PyTorch ROCm wheel index (conda-forge ships no ROCm build),
+with `pytorch-triton-rocm` satisfied by the stub wheels in `stubs/` (triton is only
+used by `torch.compile`, which the loop does not use), and `gpytorch` from PyPI;
+`mpmath` is pinned `<= 1.3` in that feature because gpytorch requires it. `cuda` takes
+`pytorch-gpu` and `gpytorch` from conda-forge (`cuda = "12.6"` system requirement);
+it is lock-solved but has not been run on an NVIDIA machine yet. Which environment a
+scan uses is the config key `active_learning.environment`; the default (CPU)
+environment is refused with a FATAL message. See [active_learning.md](active_learning.md).
 
 For more on pixi multi-environment support, see the [pixi environments documentation](https://pixi.sh/latest/features/multi-environment/).
 

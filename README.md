@@ -17,6 +17,7 @@ Modern pMSSM model generation, orchestrated by a [Snakemake](https://snakemake.r
     - [Diagnostics](#diagnostics)
   - [Grid sampling](#grid-sampling)
   - [Importance sampling](#importance-sampling)
+  - [Active learning](#active-learning)
   - [Extracting interesting models](#extracting-interesting-models)
     - [From scan directories](#from-scan-directories)
     - [From .tar balls directly](#from-tar-balls-directly)
@@ -89,7 +90,9 @@ source build/setup.sh
 
 ## Environments
 
-The project provides three pixi environments:
+The project provides three pixi environments for the standard scans, plus two GPU
+environments (`rocm`, `cuda`) that only `prior: active_learning` needs (see
+[Active learning](#active-learning) and [doc/pixi.md](doc/pixi.md)):
 
 **Default environment** — contains the full build toolchain (compilers, cmake), all Python dependencies, and the external physics software. This is what you use for building and running scans. ROOT ntuples are produced and read using [uproot](https://uproot.readthedocs.io/), a pure-Python library for ROOT file I/O that does **not** require a ROOT installation. uproot is included in the default environment automatically.
 
@@ -208,8 +211,9 @@ Run3ModelGen supports five sampling priors:
 | `mcmc` | emcee affine-invariant ensemble sampler guided by physics constraints. See [MCMC sampling](#mcmc-sampling). |
 | `grid` | Cartesian product over specified parameter values. See [Grid sampling](#grid-sampling). |
 | `importance` | Perturbs known viable seed models with narrow Gaussians. See [Importance sampling](#importance-sampling). |
+| `active_learning` | Surrogate-guided sampling: a transformer, DNN or Gaussian process trained on the labelled models picks the next batch. GPU only. See [Active learning](#active-learning). |
 
-The prior is set in the config file via `prior: flat`, `prior: fixed`, `prior: mcmc`, `prior: grid`, or `prior: importance`.
+The prior is set in the config file via `prior: flat`, `prior: fixed`, `prior: mcmc`, `prior: grid`, `prior: importance`, or `prior: active_learning`.
 
 ## Changing the scan configuration
 
@@ -229,6 +233,7 @@ genConfig.py mcmc --output_dir myrun/  # Generates example_mcmc_config.yaml in m
 genConfig.py fixed                     # Generates example_fixed_config.yaml in current dir
 genConfig.py grid                      # Generates example_grid_config.yaml in current dir
 genConfig.py importance                # Generates example_importance_config.yaml in current dir
+genConfig.py active_learning           # Generates example_active_learning_config.yaml in current dir
 ```
 
 Example configs are stored in [source/Run3ModelGen/data/configs/](source/Run3ModelGen/data/configs/).
@@ -361,6 +366,50 @@ Key points:
 
 For full details on the config format, see [doc/configs.md](doc/configs.md).
 
+## Active learning
+
+`prior: active_learning` labels a uniform seed set with the pipeline, trains a surrogate
+model on every labelled point, scores a fresh pool of candidates, selects a batch by an
+acquisition rule, labels it, and repeats. Four surrogates (`transformer`, `dnn`,
+`exact_gp`, `deep_gp`), two heads (`classification` of which side of the target value a
+point falls on, or `regression` of the transformed target) and three acquisition rules
+(`cls_entropy`; `entropy_batch`, `tol_only_random`) are available; the default is the
+transformer with classification and entropy. It is the loop of the pMSSM active-learning
+benchmark ([jwuerzinger/pmssm-al-benchmark](https://github.com/jwuerzinger/pmssm-al-benchmark)),
+ported into Run3ModelGen with no dependency on that repository.
+
+```yaml
+prior: active_learning
+num_models: 500                # selected and labelled per iteration
+active_learning:
+  environment: rocm            # the GPU pixi environment the loop runs in (rocm | cuda)
+  seed_models: 2000
+  n_iterations: 40
+  model: transformer           # transformer | dnn | exact_gp | deep_gp
+  head: classification         # classification | regression
+  strategy: cls_entropy        # classification: cls_entropy; regression: entropy_batch | tol_only_random
+  target: {branch: MO_Omega, value: 0.12, transform: log, valid: {lo: 0, hi: 1}, hit_tolerance: 0.10}
+  vetoes: [{branch: SP_m_h, lo: 0}, {branch: SP_LSP_type, lo: 0.5, hi: 3.5}]
+```
+
+**It runs on a GPU, in one of the two extra pixi environments** (`rocm` for AMD, `cuda`
+for NVIDIA; both are supersets of the default one), and refuses the default (CPU)
+environment with a `FATAL` message — at config validation, at `genModels.py`'s
+pre-flight when launched from another environment, and in the job if no GPU is visible:
+
+```bash
+pixi install -e rocm && pixi run -e rocm build      # once
+pixi run -e rocm genModels.py --config_file source/Run3ModelGen/data/configs/example_active_learning_config.yaml \
+    --scan_dir /ptmp/$USER/al_relic --backend slurm
+```
+
+Every iteration is an ordinary scan directory (`<scan_dir>/iteration_NNN/` with the
+per-tool outputs, `scan_config.yaml` and `ntuple.0.0.root`, plus the training log, the
+surrogate checkpoint and the selection), and the scan's ntuple merges them all with
+`al_*` branches (iteration, prediction, acquisition score, valid, hit). The loop
+checkpoints after every iteration and resumes when the same command is re-run. Full
+reference: [doc/active_learning.md](doc/active_learning.md).
+
 ## Extracting interesting models
 
 Interesting models to be fed into the [pMSSMFactory](https://gitlab.cern.ch/atlas-phys-susy-wg/summaries/pmssm/pMSSMFactory) can be extracted using [extractModels.py](source/Run3ModelGen/scripts/extractModels.py). This script works both with directories and .tar balls.
@@ -418,6 +467,7 @@ Detailed documentation is available in the [doc/](doc/) directory:
 - [workflow/README.md](workflow/README.md) - Workflow *sources* layout (for contributors): which rule lives in which `.smk`, the `r3mg_batch.py` subcommand interface, and the invariants a change must respect
 - [doc/ntuple.md](doc/ntuple.md) - NTuple structure: tree layout, branch naming, and per-tool branch groups
 - [doc/emcee.md](doc/emcee.md) - MCMC (emcee) sampling: algorithm, configuration keys, run commands, diagnostics, resume, and output
+- [doc/active_learning.md](doc/active_learning.md) - Active learning: the loop, the GPU environments and the FATAL rule, every config key, surrogates/heads/strategies, the per-iteration output layout, resume
 - [doc/constraints.md](doc/constraints.md) - Physics constraints specification (types, sources, examples)
 - [doc/configs.md](doc/configs.md) - Configuration system, prior types, and `genConfig.py` usage
 - [doc/pixi.md](doc/pixi.md) - pixi package manager: environments, tasks, dependencies
