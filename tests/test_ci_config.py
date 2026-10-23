@@ -329,7 +329,9 @@ def test_active_learning_gpu_is_requested_through_the_plugin_resource(repo):
         profile = _yaml.safe_load(f)
     al = profile["set-resources"]["active_learning"]
     assert "gres" not in str(al.get("slurm_extra", "")), "never --gres via slurm_extra (silent hang)"
-    assert al.get("gpu") == 1, "the GPU request is the plugin's gpu resource"
+    # the plugin's `gres` resource, quoted for snakemake's expression evaluation; `gpu: 1`
+    # (-> --gpus=1) is denied by viper's apu1 partition
+    assert al.get("gres") == "'gpu:1'", "the GPU request is the plugin's gres resource"
     assert "active_learning=batch" in [str(g) for g in profile["groups"]], \
         "the rule must be grouped like the other per-batch rules"
 

@@ -13,7 +13,7 @@
 # Resources: threads = active_learning.nworkers = the CPU labelling workers (each runs
 # its own SPheno/micromegas/... pipeline, ~2 GB; with SModelS in the steps ~3.5 GB), plus
 # the parent process that holds the surrogate on the GPU. The GPU itself is requested in
-# the cluster profiles (slurm: the `gpu: 1` resource on the `active_learning` rule). Override per
+# the cluster profiles (slurm: the `gres: gpu:1` resource on the `active_learning` rule). Override per
 # run with `--set-resources active_learning:mem_mb=<n>`.
 #
 # This file is parse-time pure (stdlib + yaml only; see the Snakefile docstring).
