@@ -1,0 +1,72 @@
+# Active learning on the relic density: transformer + classification + entropy.
+#
+# `prior: active_learning` labels a uniform seed set with the pipeline, then repeats
+# {train surrogate -> score candidates -> select num_models -> label} n_iterations
+# times. Every key of the loop lives in the `active_learning` block (defaults in
+# default_config.yaml; see doc/active_learning.md). The loop runs on a GPU, in the pixi
+# environment named by `environment` -- never in the default (CPU) one:
+#
+#   pixi install -e rocm && pixi run -e rocm build        # once
+#   pixi run -e rocm genModels.py --config_file <this file> --scan_dir <dir> --backend slurm
+#
+# Free parameters (9): M_1, M_2, mu, tanb, AT, Ab, Atau, meL, meR; the rest are fixed, as
+# in the pMSSM active-learning benchmark. Classification here means the surrogate learns
+# which side of Omega h^2 = 0.12 a point falls on, and acquisition picks the points whose
+# verdict is least certain (cls_entropy); the hit band for the diagnostics is +-10 %.
+prior: active_learning
+num_models: 500            # selected and labelled per iteration
+isGMSB: False
+tool_timeout: 300          # seconds per external tool call (a hung binary fails the model)
+
+active_learning:
+  environment: rocm
+  nworkers: 16
+  seed_models: 2000
+  n_iterations: 40
+  model: transformer
+  head: classification
+  strategy: cls_entropy
+  target:
+    branch: MO_Omega
+    value: 0.12
+    transform: log
+    valid: {lo: 0.0, hi: 1.0}
+    hit_tolerance: 0.10
+  vetoes:
+    - {branch: SP_m_h, lo: 0.0}                  # SPheno produced a spectrum
+    - {branch: SP_LSP_type, lo: 0.5, hi: 3.5}    # neutralino LSP (1 bino, 2 wino, 3 higgsino-like)
+
+parameters:
+  AT: [-8000, 8000]
+  Ab: [-2000, 2000]
+  Atau: [-2000, 2000]
+  M_1: [-2000, 2000]
+  M_2: [-2000, 2000]
+  M_3: [4000, 4000]
+  mA: [2000, 2000]
+  mbR: [4000, 4000]
+  mdR: [4000, 4000]
+  meL: [0, 2000]
+  meR: [0, 2000]
+  mqL1: [4000, 4000]
+  mqL3: [4000, 4000]
+  mtR: [4000, 4000]
+  mtauL: [2000, 2000]
+  mtauR: [2000, 2000]
+  mu: [-2000, 2000]
+  muR: [4000, 4000]
+  tanb: [1, 60]
+
+steps:
+  - name: prep_input
+    output_dir: input
+    prefix: IN
+  - name: SPheno
+    input_dir: input
+    output_dir: SPheno
+    log_dir: SPheno_log
+    prefix: SP
+  - name: micromegas
+    input_dir: SPheno
+    output_dir: micromegas
+    prefix: MO

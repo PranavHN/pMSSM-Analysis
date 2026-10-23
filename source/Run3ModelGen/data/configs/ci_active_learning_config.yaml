@@ -1,0 +1,75 @@
+# Tiny active-learning config for the DAG dry-run (tests/run_checks.sh) and the GPU smoke
+# test: 30 seed models, 2 iterations x 10 models, a few epochs, prep_input + SPheno +
+# micromegas. Not reference-gated (no GPU in CI).
+#
+# GPU smoke test (MPCDF viper):
+#   pixi run -e rocm genModels.py --config_file <this file> --scan_dir /ptmp/$USER/al_smoke --backend slurm
+prior: active_learning
+num_models: 10
+isGMSB: False
+tool_timeout: 120
+
+active_learning:
+  environment: rocm
+  nworkers: 4
+  walltime_hours: 1
+  seed_models: 30
+  n_iterations: 2
+  model: transformer
+  head: classification
+  strategy: cls_entropy
+  candidates:
+    n_candidates: 2000
+  training:
+    epochs: 5
+    patience: 5
+  acquisition:
+    mc_samples: 5
+    entropy_pool_size: 100
+  labelling:
+    min_valid_fraction: 0.3
+    max_attempts: 2
+  target:
+    branch: MO_Omega
+    value: 0.12
+    transform: log
+    valid: {lo: 0.0, hi: 1.0}
+    hit_tolerance: 0.10
+  vetoes:
+    - {branch: SP_m_h, lo: 0.0}
+    - {branch: SP_LSP_type, lo: 0.5, hi: 3.5}
+
+parameters:
+  AT: [-8000, 8000]
+  Ab: [-2000, 2000]
+  Atau: [-2000, 2000]
+  M_1: [-2000, 2000]
+  M_2: [-2000, 2000]
+  M_3: [4000, 4000]
+  mA: [2000, 2000]
+  mbR: [4000, 4000]
+  mdR: [4000, 4000]
+  meL: [0, 2000]
+  meR: [0, 2000]
+  mqL1: [4000, 4000]
+  mqL3: [4000, 4000]
+  mtR: [4000, 4000]
+  mtauL: [2000, 2000]
+  mtauR: [2000, 2000]
+  mu: [-2000, 2000]
+  muR: [4000, 4000]
+  tanb: [1, 60]
+
+steps:
+  - name: prep_input
+    output_dir: input
+    prefix: IN
+  - name: SPheno
+    input_dir: input
+    output_dir: SPheno
+    log_dir: SPheno_log
+    prefix: SP
+  - name: micromegas
+    input_dir: SPheno
+    output_dir: micromegas
+    prefix: MO
