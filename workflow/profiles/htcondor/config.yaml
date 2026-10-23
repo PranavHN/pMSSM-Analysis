@@ -27,6 +27,7 @@ groups:
   - step=batch
   - ntuple=batch
   - chain=batch
+  - active_learning=batch
   - tarball=batch
   - publish=batch
 group-components:
@@ -139,3 +140,8 @@ set-threads:
 set-resources:
   sample:
     classad_RequestCpus: 2
+  # prior: active_learning needs a GPU. +RequestGPUs is forwarded verbatim by the
+  # classad_* passthrough; untested on lxbatch (developed on SLURM), so check
+  # condor_q -better-analyze after the first submission.
+  active_learning:
+    classad_RequestGPUs: 1

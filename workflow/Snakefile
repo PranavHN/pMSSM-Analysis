@@ -69,18 +69,6 @@ REPO = os.path.dirname(workflow.basedir)
 DATA = f"{REPO}/source/Run3ModelGen/data"
 SCRIPTS = f"{REPO}/source/Run3ModelGen/scripts"     # user entrypoints + build helpers
 RULE_SCRIPTS = f"{workflow.basedir}/scripts"        # rule bodies (r3mg_batch.py)
-ENV_BIN = f"{REPO}/.pixi/envs/default/bin"
-
-# Every rule shell gets the full legacy worker environment: the pixi env's
-# binaries (SPheno, softpoint.x, slha.x, gm2calc.x, FeynHiggs, python, ...)
-# plus build/setup.sh (scripts + micromegas on PATH, PYTHONPATH, DATAPATH,
-# EOSPATH, RUN3MODELGENDIR, SMODELS_CACHEDIR). Absolute shared-FS paths, so
-# this works identically under the local, slurm and htcondor executors.
-# SETUP_PYTHIA8_QUIET: setup.sh re-runs the (idempotent) pythia8 check on every
-# source; silence its per-rule "nothing to do" line — real builds still print.
-# NB: no literal braces here — snakemake runs its formatter over the prefix.
-shell.prefix(f'set -euo pipefail; export PATH="{ENV_BIN}:$PATH"; '
-             f'export SETUP_PYTHIA8_QUIET=1; source {REPO}/build/setup.sh; ')
 
 
 # ── config ─────────────────────────────────────────────────────────────────
@@ -142,6 +130,26 @@ def _resolve_steps(steps):
 
 CFG = _load_cfg(CONFIG_FILE)
 PRIOR = CFG.get("prior", "flat")
+
+# Which pixi environment the rule shells run in. Every prior uses the default (CPU)
+# environment, except prior: active_learning, whose surrogate needs torch on a GPU: it
+# runs in the environment the config names (`active_learning.environment`: rocm | cuda,
+# both supersets of the default one, see pixi.toml). Parse-time pure: a yaml key.
+AL_CFG = CFG.get("active_learning") or {}
+ENV_NAME = str(AL_CFG.get("environment") or "rocm") if PRIOR == "active_learning" else "default"
+ENV_BIN = f"{REPO}/.pixi/envs/{ENV_NAME}/bin"
+
+# Every rule shell gets the full legacy worker environment: the pixi env's
+# binaries (SPheno, softpoint.x, slha.x, gm2calc.x, FeynHiggs, python, ...)
+# plus build/setup.sh (scripts + micromegas on PATH, PYTHONPATH, DATAPATH,
+# EOSPATH, RUN3MODELGENDIR, SMODELS_CACHEDIR). Absolute shared-FS paths, so
+# this works identically under the local, slurm and htcondor executors.
+# SETUP_PYTHIA8_QUIET: setup.sh re-runs the (idempotent) pythia8 check on every
+# source; silence its per-rule "nothing to do" line — real builds still print.
+# NB: no literal braces here — snakemake runs its formatter over the prefix.
+shell.prefix(f'set -euo pipefail; export PATH="{ENV_BIN}:$PATH"; '
+             f'export SETUP_PYTHIA8_QUIET=1; source {REPO}/build/setup.sh; ')
+
 STEPS = _resolve_steps(CFG.get("steps", []))
 STEP_NAMES = [s["name"] for s in STEPS]
 LAST_STEP = STEP_NAMES[-1]
@@ -187,7 +195,9 @@ else:
 # Identical unless meta_parent is set, so the shared-FS layout is unchanged.
 WORK = os.path.normpath(f"{SCAN_PARENT}/r3mg")
 META = os.path.normpath(f"{META_PARENT or SCAN_PARENT}/r3mg")
-WARM = f"{REPO}/build/.warm"
+# The warm-up flags are a property of the ENVIRONMENT (pythia8 is compiled into the
+# env's smodels), so a GPU environment gets its own flag dir.
+WARM = f"{REPO}/build/.warm" if ENV_NAME == "default" else f"{REPO}/build/.warm-{ENV_NAME}"
 
 CFG_OPT = f"--config_file {CONFIG_FILE}" if CONFIG_FILE else ""
 
@@ -203,6 +213,8 @@ else:
     include: "rules/warmup.smk"
     if PRIOR == "mcmc":
         include: "rules/chain.smk"
+    elif PRIOR == "active_learning":
+        include: "rules/active_learning.smk"
     else:
         include: "rules/generate.smk"
     include: "rules/publish.smk"

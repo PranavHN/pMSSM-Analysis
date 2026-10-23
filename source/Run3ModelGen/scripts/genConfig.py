@@ -5,10 +5,10 @@ import shutil
 import click
 
 @click.command()
-@click.argument('prior', type=click.Choice(['flat', 'fixed', 'mcmc', 'grid', 'importance'], case_sensitive=False))
+@click.argument('prior', type=click.Choice(['flat', 'fixed', 'mcmc', 'grid', 'importance', 'active_learning'], case_sensitive=False))
 @click.option('--output_dir', default='.', type=str, help='Directory to save the config file. Defaults to current working directory.')
 def main(prior, output_dir):
-    '''Generate an example config file for the given prior type (flat, fixed, mcmc, grid, or importance).'''
+    '''Generate an example config file for the given prior type (flat, fixed, mcmc, grid, importance, or active_learning).'''
 
     datadir = os.environ['DATAPATH'].split(':')[0]
     config_map = {
@@ -17,6 +17,7 @@ def main(prior, output_dir):
         'mcmc':  'example_mcmc_config.yaml',
         'grid':  'example_grid_config.yaml',
         'importance': 'example_importance_config.yaml',
+        'active_learning': 'example_active_learning_config.yaml',
     }
 
     src = os.path.join(datadir, 'configs', config_map[prior])

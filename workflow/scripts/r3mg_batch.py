@@ -2,7 +2,8 @@
 '''Internal per-batch CLI driving the Snakemake workflow rules.
 
 Each subcommand is the body of ONE Snakemake rule for ONE batch (= one scan
-dir): sample | step | ntuple | chain | publish. Not intended for direct user
+dir): sample | step | ntuple | chain | active_learning | tarball | publish.
+Not intended for direct user
 consumption — genModels.py / extractModels.py / rerunStep.py are the
 user-facing entrypoints.
 
@@ -321,6 +322,79 @@ def chain(config_file, scan_dir, seed, manifest_out, nworkers):
                 log.warning(f"emcee diagnostics exited {rc} (non-fatal); partial output in {diag_dir}")
         except Exception as e:
             log.warning(f"emcee diagnostics failed (non-fatal): {e!r}")
+    finally:
+        os.chdir(orig_cwd)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+@cli.command()
+@click.option('--config_file', default=None)
+@click.option('--scan_dir', required=True, type=str)
+@click.option('--seed', required=True, type=int)
+@click.option('--manifest_out', required=True, type=str)
+@click.option('--nworkers', default=None, type=int,
+              help='Labelling worker-pool size (defaults to the active_learning.nworkers config).')
+@click.option('--batch_index', default=0, type=int,
+              help='Batch index b of scan.<runid>.<b> (model ids = b*100000 + index); 0 for a single scan.')
+def active_learning(config_file, scan_dir, seed, manifest_out, nworkers, batch_index):
+    '''Run one active-learning scan (prior: active_learning) as a single opaque job.
+
+    The loop (Run3ModelGen.active_learning.loop) trains a surrogate on a GPU and labels
+    its selections with the pipeline in a worker pool; every iteration is a scan dir
+    under <scan_dir>/iteration_NNN. It checkpoints to <scan_dir>/al_state.pt and resumes
+    from it, so the scan dir is NOT wiped. The declared outputs (ntuple, manifest, diag)
+    appear only once every iteration is done: a wall-clock stop exits 3 without them.
+
+    FATAL without torch or without a visible GPU: there is no CPU mode.
+    '''
+    scan_dir = os.path.abspath(scan_dir)
+    manifest_out = os.path.abspath(manifest_out)
+    if config_file:
+        config_file = os.path.abspath(config_file)
+
+    # Private cwd for the parent (tool scratch of the workers lives in per-worker dirs
+    # under it); removed in the finally.
+    orig_cwd = os.getcwd()
+    workdir = tempfile.mkdtemp(prefix="r3mg_al_")
+    os.chdir(workdir)
+    try:
+        mg = _load_generator(config_file, scan_dir, seed)
+        if mg.prior != 'active_learning':
+            raise click.ClickException(f"active_learning rule invoked with prior '{mg.prior}'")
+
+        from Run3ModelGen.active_learning.loop import (require_gpu, run_active_learning_scan,
+                                                       STOP_EXIT_CODE)
+        require_gpu()                        # FATAL + exit 1 on a CPU-only process
+        os.makedirs(scan_dir, exist_ok=True)
+        alcfg = getattr(mg, 'active_learning', {}) or {}
+        summary = run_active_learning_scan(
+            config_file=config_file, scan_dir=scan_dir, seed=seed, nworkers=nworkers,
+            max_hours=(alcfg.get('walltime_hours') or 23.0), worker_base=workdir,
+            to_ntuple=pipeline.ntuple_name(scan_dir), batch_index=batch_index)
+        mg._dump_scan_config()
+
+        if not summary.get("complete"):
+            log.warning(f"active learning stopped after iteration {summary.get('iterations_done')} "
+                        f"of {summary.get('n_iterations')} ({summary.get('stopped')}); the scan's "
+                        f"ntuple and manifest are not written. Re-run the same command to resume.")
+            sys.exit(STOP_EXIT_CODE)
+
+        manifest = {"engine": "active_learning", "seed": seed,
+                    "model": summary.get("model"), "head": summary.get("head"),
+                    "strategy": summary.get("strategy"),
+                    "iterations": summary.get("iterations_done"),
+                    "n_models": summary.get("n_models"), "n_valid": summary.get("n_valid"),
+                    "n_hits": summary.get("n_hits"), "wall_hours": summary.get("wall_hours"),
+                    "scheduler": pipeline.scheduler_identity()}
+        os.makedirs(os.path.dirname(manifest_out), exist_ok=True)
+        with open(manifest_out, "w") as f:
+            json.dump(manifest, f, indent=1)
+
+        # Final step: diagnostics -> <scan_dir>/diag (a declared directory output). Best
+        # effort, as for the chain; the dir always exists.
+        from Run3ModelGen.active_learning.diagnostics import write_diagnostics
+        os.makedirs(os.path.join(scan_dir, 'diag'), exist_ok=True)
+        write_diagnostics(scan_dir, summary, logger=log)
     finally:
         os.chdir(orig_cwd)
         shutil.rmtree(workdir, ignore_errors=True)
