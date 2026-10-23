@@ -87,6 +87,21 @@ fi
 echo "== workflow DAG: mcmc chain (emcee) =="
 "${SMK[@]}" --config mode=single scan_dir=run/dryrun_mcmc config_file="$CFGD/ci_mcmc_config.yaml"
 
+# prior: active_learning parses in any environment (the DAG is yaml-only); the rule shell
+# would need the GPU env, which a dry-run never enters. Both modes: the rule has a
+# single-scan and a batch variant.
+echo "== workflow DAG: active learning (single + batch) =="
+"${SMK[@]}" --config mode=single scan_dir=run/dryrun_al config_file="$CFGD/ci_active_learning_config.yaml"
+"${SMK[@]}" -p --config mode=batch runid=1 batches=2 scan_parent=run config_file="$CFGD/ci_active_learning_config.yaml" > "$dry"
+if ! grep -q -- "r3mg_batch.py active_learning .*--batch_index" "$dry"; then
+    echo "FAIL: the batch active_learning rule does not pass --batch_index"; exit 1
+fi
+# The environment switch is the shell prefix (not printed by -p); its visible trace is
+# the per-environment warm-up flag dir the rule depends on.
+if ! grep -q -- "/.warm-rocm/pythia8.ok" "$dry"; then
+    echo "FAIL: the active_learning DAG must use the GPU environment named by the config (warm flags in build/.warm-rocm)"; exit 1
+fi
+
 echo "== workflow DAG: extraction fan-out =="
 "${SMK[@]}" --config mode=extract eos_dir=/fake/123 procids=0,1 work_dir=run
 

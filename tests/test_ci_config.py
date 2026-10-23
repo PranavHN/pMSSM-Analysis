@@ -90,6 +90,10 @@ def test_no_tools_missing_from_the_ci_image(ci):
 # branch VALUES as well as counts (compare_values in refcheck.SCANS), because an emcee
 # run at a fixed seed reproduces exactly (tests/test_emcee_determinism.py) while its
 # counts are near-vacuous: every model clears every step.
+#
+# prior: active_learning is deliberately NOT here: it needs a GPU, which no CI runner has.
+# Its coverage is the unit suite (tests/test_active_learning_*.py; the torch half runs in
+# the GPU environments) and the DAG dry-run in run_checks.sh, pinned below.
 ALL_PRIORS = ("flat", "fixed", "mcmc", "grid", "importance")
 # The docker track exists to validate the published image, not to re-prove the
 # physics: both tracks resolve from the same pixi.lock, so a representative
@@ -249,6 +253,23 @@ def test_the_sampled_point_golden_file_is_guarded(repo):
     assert (repo / "tests" / "fixtures" / "sampling_seed123.json").is_file()
     assert (repo / "tests" / "test_sampling_fixture.py").is_file()
     assert (repo / "tests" / "regen_sampling_fixture.py").is_file()
+
+
+def test_offline_checks_cover_the_active_learning_dag(checks_script):
+    '''No GPU in CI, so the DAG dry-run is the only CI coverage of the active_learning
+    rule: both its variants must parse, and the shells must run in the GPU environment.'''
+    assert "ci_active_learning_config.yaml" in checks_script
+    assert "--batch_index" in checks_script, "the batch variant must be dry-run too"
+    assert "/.warm-rocm/pythia8.ok" in checks_script, "the environment switch must be checked"
+
+
+def test_active_learning_rule_body_is_referenced_by_the_rule(repo):
+    '''The rule invokes `r3mg_batch.py active_learning`; the subcommand must exist, or the
+    typo only surfaces on a GPU node.'''
+    smk = (repo / "workflow" / "rules" / "active_learning.smk").read_text()
+    assert "r3mg_batch.py active_learning" in smk
+    body = (repo / "workflow" / "scripts" / "r3mg_batch.py").read_text()
+    assert "def active_learning(" in body
 
 
 def test_offline_checks_fail_fast(checks_script):
