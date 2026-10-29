@@ -69,3 +69,59 @@ mcmc:
   init:
     strategy: spread
 constraints: []
+active_learning:
+  # prior: active_learning runs the surrogate-guided loop (see doc/active_learning.md).
+  # These are the defaults; a user config overrides any subset of the keys (nested keys
+  # merge). Defaults are the benchmark drivers' click defaults, except where the paper's
+  # production values are used (marked "campaign"). The flat default prior ignores this block.
+  environment: rocm           # rocm | cuda: the pixi environment the loop runs in. No CPU mode.
+  nworkers: 16                # CPU workers labelling one batch (= the rule's cpus-per-task)
+  walltime_hours: 23          # wall-clock guard; the loop checkpoints and resumes
+  seed_models: 2000           # iteration_000: uniform draws from `parameters`, labelled (campaign)
+  n_iterations: 40
+  val_fraction: 0.2           # of every labelled batch goes to the validation split
+  model: transformer          # transformer | dnn | exact_gp | deep_gp
+  head: classification        # classification | regression
+  strategy: cls_entropy       # classification -> cls_entropy; regression -> entropy_batch | tol_only_random
+  target:                     # the ntuple branch the surrogate learns
+    branch: MO_Omega
+    value: 0.12               # t = log(branch / value); classification label is branch > value
+    transform: log            # log | none
+    valid: {lo: 0.0, hi: 1.0} # raw-branch validity window (strict); -1 (not computed) never passes
+    hit_tolerance: 0.10       # |branch - value| / |value| < 0.10 counts as a hit (diagnostics)
+  vetoes:                     # strict windows; every veto must pass for a model to be valid
+    - {branch: SP_m_h, lo: 0.0}
+    - {branch: SP_LSP_type, lo: 0.5, hi: 3.5}   # bino/wino/higgsino-like neutralino LSP
+  candidates:
+    n_candidates: 1000000     # candidates scored per iteration (campaign)
+    generation: lhs           # lhs | uniform over the free parameters
+  training:
+    epochs: 10000             # campaign
+    patience: 200             # early stopping on the validation loss, best state restored
+    warm_start: false         # neural surrogates cold (campaign); set true for the GPs
+    learning_rate: 3.0e-4     # neural surrogates (the GPs read gp.learning_rate)
+    weight_decay: 1.0e-4      # AdamW; cosine annealing to 1e-6; gradient clip 1.0
+    batch_size: 256
+  transformer: {d_model: 128, nhead: 4, num_layers: 3, dim_feedforward: 512, dropout: 0.1}
+  dnn: {d_model: 64, num_layers: 4, dim_feedforward: 256, dropout: 0.1}
+  gp:
+    kernel: RBF               # RBF | Matern | RQK
+    lengthscale: 1.0
+    noise: 0.01
+    jitter: 0.001
+    use_ard: true
+    learning_rate: 0.001
+    batch_size: 256           # deep GP minibatch
+    num_samples: 8            # deep GP likelihood samples
+    num_hidden_dims: 10       # deep GP hidden layer width
+    num_inducing_max: 256     # deep GP inducing points (campaign)
+  acquisition:
+    mc_samples: 30            # MC-dropout passes (neural surrogates)
+    tolerance: 1.0            # keep |mean - threshold| < tolerance before selecting (0 = off)
+    proximity: 0.1            # variance weight exp(-(mean - threshold)^2 / proximity) (0 = off)
+    entropy_pool_size: 5000   # entropy_batch: focused pool size
+    entropy_blur: 0.15        # entropy_batch: smoothing of the mean at the boundary
+    entropy_beta: 50.0        # entropy_batch: Gibbs temperature (high = greedy)
+  labelling:
+    min_valid_fraction: 0.6   # retry with a fresh pool until this fraction of num_models is valid
+    max_attempts: 10

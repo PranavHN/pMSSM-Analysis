@@ -19,6 +19,7 @@ running but no driver to schedule the rest.
 import getpass
 import hashlib
 import os
+import re
 import shutil
 import signal
 import socket
@@ -214,6 +215,54 @@ def preflight(backend: str, publish: bool = False) -> list:
             elif not os.access(probe, os.W_OK):
                 problems.append(f"--publish destination $EOSPATH={eospath} is not writable/creatable "
                                 f"on this host (export EOSPATH=... or use a root:// URL).")
+    return problems
+
+
+def active_learning_preflight(merged_cfg: dict, repo: str = None, check_torch: bool = True) -> list:
+    '''Blocking problems of a `prior: active_learning` run, all prefixed FATAL.
+
+    The loop has no CPU mode, so it must run in a GPU pixi environment (`rocm` or
+    `cuda`, supersets of the default one) and the entrypoint must be LAUNCHED from that
+    environment: `pixi run -e rocm genModels.py ...` (or `pixi shell -e rocm`). Checked:
+      * `active_learning.environment` is rocm or cuda (never default);
+      * the environment is installed (`<repo>/.pixi/envs/<env>/bin/python` exists) and
+        imports torch (unless check_torch is False);
+      * the current process runs in that environment (PIXI_ENVIRONMENT_NAME, else the
+        interpreter path), so the default environment refuses with a FATAL line instead
+        of submitting a job whose rule shell would die on the first import.
+    Other priors: no problems, nothing checked.
+    '''
+    if (merged_cfg or {}).get("prior") != "active_learning":
+        return []
+    import sys
+
+    problems = []
+    env = ((merged_cfg.get("active_learning") or {}).get("environment")) or "rocm"
+    hint = (f"install and launch from a GPU environment: pixi install -e {env} && "
+            f"pixi run -e {env} genModels.py ... (or pixi shell -e {env})")
+    if env not in ("rocm", "cuda"):
+        return [f"FATAL: active_learning.environment={env!r} is not a GPU environment; prior: "
+                f"active_learning has no CPU mode. Set it to rocm or cuda; {hint}"]
+    repo = (repo or os.environ.get("RUN3MODELGENDIR", "")).rstrip("/")
+    env_python = f"{repo}/.pixi/envs/{env}/bin/python" if repo else ""
+    if not env_python or not os.path.exists(env_python):
+        problems.append(f"FATAL: the {env!r} pixi environment is not installed "
+                        f"({env_python or '<RUN3MODELGENDIR unset>'} missing); {hint}")
+    elif check_torch:
+        res = subprocess.run([env_python, "-c", "import torch"], capture_output=True, text=True)
+        if res.returncode != 0:
+            problems.append(f"FATAL: the {env!r} pixi environment cannot import torch "
+                            f"({res.stderr.strip().splitlines()[-1] if res.stderr.strip() else 'no error text'}); "
+                            f"re-install it: pixi install -e {env}")
+
+    running = os.environ.get("PIXI_ENVIRONMENT_NAME")
+    if not running:
+        m = re.search(r"/\.pixi/envs/([^/]+)/", sys.executable)
+        running = m.group(1) if m else None
+    if running is not None and running != env:
+        problems.append(f"FATAL: this process runs in the {running!r} pixi environment but the "
+                        f"config needs {env!r} (the default environment is CPU-only, and prior: "
+                        f"active_learning has no CPU mode); {hint}")
     return problems
 
 

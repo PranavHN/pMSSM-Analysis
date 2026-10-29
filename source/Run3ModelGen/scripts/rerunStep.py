@@ -33,8 +33,8 @@ def main(step_name, scan_dir, config_file, seed, backend, log_dir, foreground):
     scan's scan_config.yaml, so a plain
     `rerunStep.py --step micromegas --scan_dir scan` is usually enough.
 
-    Not applicable to prior=mcmc scans: the chain runs the whole pipeline
-    inside sampling and can only be redone as a whole (via genModels.py).
+    Not applicable to prior=mcmc or prior=active_learning scans: they run the
+    pipeline inside sampling and can only be redone as a whole (via genModels.py).
     '''
 
     # Absolute for the same reason as in genModels.py: a cluster worker runs in
@@ -75,6 +75,13 @@ def main(step_name, scan_dir, config_file, seed, backend, log_dir, foreground):
         # output (invalidating it re-runs the sampler), so point at the direct command.
         log.info(f"To redo only the emcee diagnostics of this scan (seconds; reads chain.h5 "
                  f"read-only, re-runs no sampling):  pixi run rediagnose {scan_dir}")
+        exit(1)
+
+    if recorded.get('prior') == 'active_learning':
+        log.fatal("prior=active_learning scans label every batch inside the surrogate loop and have "
+                  "no per-step re-run; re-run the whole scan with genModels.py (it resumes from "
+                  "al_state.pt). Each iteration_NNN/ is an ordinary scan dir if you only want to "
+                  "look at one batch (extractModels.py --scan_dir <scan>/iteration_NNN ...).")
         exit(1)
 
     if seed is None:

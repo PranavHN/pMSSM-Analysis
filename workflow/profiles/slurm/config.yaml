@@ -28,6 +28,7 @@ groups:
   - step=batch
   - ntuple=batch
   - chain=batch
+  - active_learning=batch
   - tarball=batch
   - publish=batch     # publish inside the batch job (parity with htcondor)
 group-components:
@@ -64,6 +65,23 @@ set-resources:
     # facade path. 16 GB gives headroom; raise further (or --set-resources
     # chain:mem_mb=0 for a whole node) for wider runs.
     mem_mb: 16000
+  active_learning:
+    # prior: active_learning — one long job per scan dir on a GPU node. The rule's own
+    # mem_mb (nworkers * 2000 + 8000) is NOT overridden here so it keeps scaling with
+    # the worker count; partition and GPU request are site settings (MPCDF viper: the
+    # shared `apu1` partition, one of the node's two MI300A GPUs). The loop checkpoints
+    # and resumes, so the 24 h limit is not a cap on the scan length.
+    #
+    # The GPU goes through the plugin's own `gres` resource (-> sbatch --gres=gpu:1),
+    # quoted so snakemake evaluates it to the bare string. NOT via slurm_extra: the plugin
+    # refuses a --gres there, and — because its error handler then trips over group jobs —
+    # the refusal is swallowed and the orchestrator waits forever at "Execute 1 jobs..."
+    # with nothing in the log (plugin 2.7.1, measured). NOT via the plugin's `gpu`
+    # resource (-> --gpus=1) either: viper's apu1 denies that spelling
+    # ("Access/permission denied") while accepting --gres=gpu:1 (apudev takes both).
+    slurm_partition: "'apu1'"
+    gres: "'gpu:1'"
+    runtime: 1380
 
 set-threads:
   step: 1               # each step is a SINGLE-threaded loop over models, so claiming

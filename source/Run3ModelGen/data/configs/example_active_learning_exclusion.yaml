@@ -1,0 +1,75 @@
+# Active learning on the LHC exclusion: DNN + regression + tolerance cut + random draw.
+#
+# The target is SModelS' best expected r-value (r > 1: expected to be excluded), so the
+# boundary t = log(r / 1) = 0 is the exclusion contour. The tol_only_random rule keeps
+# the candidates the surrogate predicts within |t| < 1 and draws num_models of them at
+# random: the control arm that isolates what the mean-guided cut contributes on its own.
+#
+# SModelS runs inside every labelling worker and loads its ~1.4 GB results database
+# once per worker, so nworkers is sized to memory (the rule requests
+# nworkers * 2000 + 8000 MB; raise it with --set-resources active_learning:mem_mb=...).
+# micromegas stays in the steps although the target does not need it (it costs ~3 % of
+# SModelS and keeps MO_Omega on every model). See example_active_learning_config.yaml
+# for how to run it.
+prior: active_learning
+num_models: 200
+isGMSB: False
+tool_timeout: 300
+
+active_learning:
+  environment: rocm
+  nworkers: 8
+  seed_models: 1000
+  n_iterations: 40
+  model: dnn
+  head: regression
+  strategy: tol_only_random
+  acquisition:
+    tolerance: 1.0
+  target:
+    branch: SModelS_bestExpR_r_expected
+    value: 1.0
+    transform: log
+    valid: {lo: 0.0}
+    hit_tolerance: 0.10
+  vetoes:
+    - {branch: SP_m_h, lo: 0.0}
+
+parameters:
+  AT: [-8000, 8000]
+  Ab: [-2000, 2000]
+  Atau: [-2000, 2000]
+  M_1: [-2000, 2000]
+  M_2: [-2000, 2000]
+  M_3: [4000, 4000]
+  mA: [2000, 2000]
+  mbR: [4000, 4000]
+  mdR: [4000, 4000]
+  meL: [0, 2000]
+  meR: [0, 2000]
+  mqL1: [4000, 4000]
+  mqL3: [4000, 4000]
+  mtR: [4000, 4000]
+  mtauL: [2000, 2000]
+  mtauR: [2000, 2000]
+  mu: [-2000, 2000]
+  muR: [4000, 4000]
+  tanb: [1, 60]
+
+steps:
+  - name: prep_input
+    output_dir: input
+    prefix: IN
+  - name: SPheno
+    input_dir: input
+    output_dir: SPheno
+    log_dir: SPheno_log
+    prefix: SP
+  - name: micromegas
+    input_dir: SPheno
+    output_dir: micromegas
+    prefix: MO
+  - name: SModelS
+    input_dir: SPheno
+    output_dir: SModelS
+    prefix: SModelS

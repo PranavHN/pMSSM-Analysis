@@ -90,6 +90,10 @@ def test_no_tools_missing_from_the_ci_image(ci):
 # branch VALUES as well as counts (compare_values in refcheck.SCANS), because an emcee
 # run at a fixed seed reproduces exactly (tests/test_emcee_determinism.py) while its
 # counts are near-vacuous: every model clears every step.
+#
+# prior: active_learning is deliberately NOT here: it needs a GPU, which no CI runner has.
+# Its coverage is the unit suite (tests/test_active_learning_*.py; the torch half runs in
+# the GPU environments) and the DAG dry-run in run_checks.sh, pinned below.
 ALL_PRIORS = ("flat", "fixed", "mcmc", "grid", "importance")
 # The docker track exists to validate the published image, not to re-prove the
 # physics: both tracks resolve from the same pixi.lock, so a representative
@@ -251,6 +255,30 @@ def test_the_sampled_point_golden_file_is_guarded(repo):
     assert (repo / "tests" / "regen_sampling_fixture.py").is_file()
 
 
+def test_offline_checks_cover_the_active_learning_dag(checks_script):
+    '''No GPU in CI, so the DAG dry-run is the only CI coverage of the active_learning
+    rule: both its variants must parse, and the shells must run in the GPU environment.'''
+    assert "ci_active_learning_config.yaml" in checks_script
+    assert "--batch_index" in checks_script, "the batch variant must be dry-run too"
+    assert "/.warm-rocm/pythia8.ok" in checks_script, "the environment switch must be checked"
+
+
+def test_active_learning_rule_body_is_referenced_by_the_rule(repo):
+    '''The rule invokes `r3mg_batch.py active_learning`; the subcommand must exist, or the
+    typo only surfaces on a GPU node.'''
+    smk = (repo / "workflow" / "rules" / "active_learning.smk").read_text()
+    assert "r3mg_batch.py active_learning" in smk
+    body = (repo / "workflow" / "scripts" / "r3mg_batch.py").read_text()
+    assert "def active_learning(" in body
+    # click derives "active-learning" from the function name unless the command is
+    # named; the rule calls the underscore spelling (caught by a real local run).
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("r3mg_batch", repo / "workflow" / "scripts" / "r3mg_batch.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert "active_learning" in mod.cli.commands, sorted(mod.cli.commands)
+
+
 def test_offline_checks_fail_fast(checks_script):
     '''Without set -e a failing check would be masked by the next one.'''
     assert "set -euo pipefail" in checks_script
@@ -289,6 +317,24 @@ def test_smodels_step_is_serialised_against_concurrent_batches(repo):
 
 
 # ── pooled cross-ensemble diagnostics ──────────────────────────────────────
+
+def test_active_learning_gpu_is_requested_through_the_plugin_resource(repo):
+    '''The slurm executor plugin refuses a --gres inside slurm_extra, and its error
+    handler then crashes on group jobs, so the refusal is swallowed and the orchestrator
+    waits forever at "Execute 1 jobs..." with nothing in the log (plugin 2.7.1, measured
+    on a real submission). The GPU must go through the plugin's `gpu` resource.'''
+    import yaml as _yaml
+
+    with open(repo / "workflow" / "profiles" / "slurm" / "config.yaml") as f:
+        profile = _yaml.safe_load(f)
+    al = profile["set-resources"]["active_learning"]
+    assert "gres" not in str(al.get("slurm_extra", "")), "never --gres via slurm_extra (silent hang)"
+    # the plugin's `gres` resource, quoted for snakemake's expression evaluation; `gpu: 1`
+    # (-> --gpus=1) is denied by viper's apu1 partition
+    assert al.get("gres") == "'gpu:1'", "the GPU request is the plugin's gres resource"
+    assert "active_learning=batch" in [str(g) for g in profile["groups"]], \
+        "the rule must be grouped like the other per-batch rules"
+
 
 def test_pooled_diag_rule_exists_and_stays_out_of_the_default_target(repo):
     '''chain_diag_all pools the per-seed backends for the AUTHORITATIVE numbers (cross-

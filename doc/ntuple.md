@@ -25,7 +25,8 @@ names are constructed, and what each group of branches contains.
     └── SModelS_*                                  # branches from step "SModelS"
 ```
 
-- **One tree**, always named `susy`.
+- **One tree**, always named `susy`. (`prior: mcmc` adds `emcee_logp`/`chi2`,
+  `prior: active_learning` the `al_*` branches of [doc/active_learning.md](active_learning.md#output).)
 - **One entry (row) per model.** `num_entries` equals the `num_models` of the scan.
 - **All branches are flat `double` arrays** of length `num_models`. There are no nested/jagged
   branches — even branching ratios and mixing-matrix elements are stored as scalar-per-model.

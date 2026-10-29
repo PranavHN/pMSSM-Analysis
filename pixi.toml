@@ -214,6 +214,54 @@ root_base = ">=6.40.0,<7"
 [feature.dagviz.dependencies]
 graphviz = ">=9"
 
+# ── GPU environments for prior: active_learning ──────────────────────────────
+# Both are SUPERSETS of the default environment (the default feature is included):
+# SPheno, micrOMEGAs, SModelS and the surrogate (torch/gpytorch) run in one process
+# tree, like the emcee chain. prior: active_learning refuses to run in the default
+# (CPU) environment -- there is no CPU mode. Pick the one matching the GPUs you have
+# with `active_learning.environment: rocm | cuda` in the scan config, then
+#   pixi install -e rocm && pixi run -e rocm build
+# (the build is environment-independent; once is enough). linux-64 only.
+#
+# rocm: conda-forge ships no ROCm PyTorch, so torch comes from the PyTorch ROCm wheel
+# index via pip (same recipe as the pmssm-al-benchmark repo, verified on MPCDF viper's
+# MI300A nodes). pytorch-triton-rocm was pulled from PyPI; the stub wheels in stubs/
+# satisfy the resolver (triton is only needed for torch.compile, which is not used).
+[feature.rocm]
+platforms = ["linux-64"]
+
+[feature.rocm.dependencies]
+scikit-learn = ">=1.4"       # KMeans inducing points (deep GP); conda so pip does not pull a second numpy
+# gpytorch (PyPI) requires mpmath <= 1.3; without this pin the conda solve picks 1.4.x
+# (via sympy) and the pypi resolution of the environment fails.
+mpmath = ">=0.19,<=1.3"
+
+[feature.rocm.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/rocm6.3"]
+find-links = [{path = "stubs/"}]
+index-strategy = "unsafe-best-match"
+
+[feature.rocm.pypi-dependencies]
+torch = ">=2.7.0,<2.8.0"
+gpytorch = ">=1.12"
+
+# cuda: everything from conda-forge. Defined and lock-solved, but not exercised on an
+# NVIDIA machine yet (the development cluster is AMD).
+[feature.cuda]
+platforms = ["linux-64"]
+
+[feature.cuda.dependencies]
+pytorch-gpu = ">=2.5"
+gpytorch = ">=1.12"
+scikit-learn = ">=1.4"
+
+# pixi warns that this table is deprecated in favour of a cuda entry on the platform
+# list, but 0.72 rejects that spelling inside a feature; this one still works.
+[feature.cuda.system-requirements]
+cuda = "12.6"
+
 [environments]
 rootenv = { features = ["rootenv"], no-default-feature = true }
 dagviz = { features = ["dagviz"], no-default-feature = true }
+rocm = { features = ["rocm"] }
+cuda = { features = ["cuda"] }

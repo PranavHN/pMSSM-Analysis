@@ -92,6 +92,13 @@ class ModelGenerator:
         # the emcee chain never moves), or a non-positive constraint uncertainty.
         self._validate_observable_sources()
 
+        # prior: active_learning — validate the active_learning block at config load, so a
+        # bad key fails here (before anything is wiped or submitted) rather than inside the
+        # loop. Torch-free, so it also runs in the default environment.
+        if getattr(self, 'prior', None) == 'active_learning':
+            from Run3ModelGen.active_learning.config import validate_active_learning
+            validate_active_learning(merged)
+
         # Print information on initialised generator
         if not quiet:
             log.info(f"Initialised ModelGenerator with:")
@@ -525,12 +532,20 @@ class ModelGenerator:
             raise ValueError(
                 "prior: mcmc runs the emcee sampler via the 'chain' rule "
                 "(r3mg_batch.py chain), not generate_models(); use genModels.py.")
+        elif self.prior == 'active_learning':
+            # prior: active_learning is the surrogate-guided loop, driven by the
+            # `active_learning` Snakemake rule (r3mg_batch.py active_learning ->
+            # Run3ModelGen.active_learning.loop), NOT generate_models.
+            raise ValueError(
+                "prior: active_learning runs the surrogate loop via the 'active_learning' rule "
+                "(r3mg_batch.py active_learning), not generate_models(); use genModels.py from "
+                "the rocm or cuda environment.")
         elif self.prior == 'grid':
             self.sample_grid()
         elif self.prior == 'importance':
             self.sample_importance()
         else:
-            raise ValueError(f"ERROR: prior {self.prior} not supported. Can be: flat, fixed, mcmc, grid, importance.")
+            raise ValueError(f"ERROR: prior {self.prior} not supported. Can be: flat, fixed, mcmc, grid, importance, active_learning.")
 
         # prep dicts to keep track of successes. `succcounts` is the gate (the tool
         # ran); `usablecounts` is the honest statistic (the output yields ntuple

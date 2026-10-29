@@ -84,6 +84,17 @@ def test_wipe_refuses_when_chain_h5_present(tmp_path):
     assert (d / "chain.h5").exists(), "guard raised but the chain was deleted anyway"
 
 
+def test_wipe_refuses_when_al_state_present(tmp_path):
+    '''An active-learning scan resumes from al_state.pt (a labelled set of simulator
+    calls); a fresh-scan wipe of it is the same mistake as wiping a chain.h5.'''
+    d = tmp_path / "scan"
+    (d / "iteration_000").mkdir(parents=True)
+    (d / "al_state.pt").write_bytes(b"state")
+    with pytest.raises(RuntimeError, match="refusing to wipe"):
+        pipeline.wipe_scan_dir(str(d))
+    assert (d / "al_state.pt").exists()
+
+
 def test_wipe_allows_ordinary_scan_dir(tmp_path):
     # No chain.h5 -> flat/grid/fixed fresh-scan semantics are unchanged.
     d = tmp_path / "scan"

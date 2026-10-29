@@ -267,7 +267,10 @@ def read_manifest(path: str) -> dict:
 # it), so a fresh-scan wipe of a directory holding one is always a mistake. The
 # ntuple/diag are deliberately NOT listed: they are cheap to regenerate from
 # chain.h5, and a flat/grid scan legitimately overwrites its own ntuple on re-run.
-_IRREPLACEABLE = ("chain.h5",)
+# An active-learning scan's al_state.pt (plus its iteration dirs) is the same kind of
+# thing: the loop resumes from it, and the labelled set it holds cost one simulator call
+# per model.
+_IRREPLACEABLE = ("chain.h5", "al_state.pt")
 
 FORCE_WIPE_ENV = "R3MG_FORCE_WIPE"
 
@@ -290,10 +293,11 @@ def wipe_scan_dir(scan_dir: str, force: bool = False) -> None:
         raise RuntimeError(
             f"refusing to wipe {scan_dir}: it holds sampler state {protected} that a "
             f"re-run would have to recompute from scratch (an emcee chain.h5 is days of "
-            f"compute, and the chain rule resumes from it rather than restarting). "
-            f"Re-running an emcee "
-            f"scan should RESUME, not wipe. If you really mean to discard it, remove "
-            f"the directory yourself or set {FORCE_WIPE_ENV}=1.")
+            f"compute, and the chain rule resumes from it rather than restarting; an "
+            f"active-learning al_state.pt is a labelled set of simulator calls that the "
+            f"active_learning rule resumes from). Re-running such a scan should RESUME, "
+            f"not wipe. If you really mean to discard it, remove the directory yourself "
+            f"or set {FORCE_WIPE_ENV}=1.")
 
     log.info(f"wiping scan dir {scan_dir} (fresh-scan semantics)")
     shutil.rmtree(scan_dir, ignore_errors=True)

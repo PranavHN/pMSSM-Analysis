@@ -148,6 +148,15 @@ def main(ctx, config_file, scan_dir, seed, backend, num_jobs, runid, base_seed, 
     if merged.get('num_models', 0) > pipeline.MAX_MODELS_PER_JOB:
         problems.append(f"num_models={merged['num_models']} exceeds the {pipeline.MAX_MODELS_PER_JOB} "
                         f"per-batch cap — reduce it and scale out with --num_jobs instead.")
+    # prior: active_learning has no CPU mode: refuse (FATAL) unless launched from the GPU
+    # environment the config names, with torch installed in it.
+    problems += snakefacade.active_learning_preflight(merged)
+    if merged.get('prior') == 'active_learning' and not problems:
+        try:
+            from Run3ModelGen.active_learning.config import load_al_config, AlConfigError
+            load_al_config(merged)
+        except AlConfigError as exc:
+            problems.append(f"FATAL: {exc}")
     if problems:
         for p in problems:
             log.fatal(p)
