@@ -1,16 +1,72 @@
-build
-run
+build/
+run/
+outputs/
+
+# ROOT Data & Archives
+*.root
+*.tar.gz
+*.zip
+.ipynb_checkpoints/
+
 # pixi environments
 .pixi
 *.egg-info
 official311.pcl
 https___smodels_github_io_database_official311
+
 # Prefetched caches routed here in CI (see .gitlab-ci.yml / setup_*.sh)
 .smodels-cache/
 .pythia8-cache/
+
 # Python bytecode
 __pycache__/
 *.py[cod]
+
 # Snakemake workflow state/bookkeeping
 .snakemake/
 .r3mg/
+
+# --- Python Virtual Environments ---
+venv/
+.venv/
+ENV/
+env/
+
+# --- Jupyter Notebooks & Kernels ---
+.ipynb_checkpoints/
+# Local Jupyter kernels or connection files tied to local paths
+ipython_kernel_config.json
+.ipython/
+
+# --- Python Bytecode & Caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Packaging & Distribution ---
+.egg-info/
+dist/
+build/
+eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg
+
+# --- Unit Testing & Coverage ---
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
