@@ -1,3 +1,29 @@
+# pMSSM Parameter Space Analysis & Workflow Pipeline
+
+A computational pipeline interfacing multiple high-energy physics toolchains (SPheno, FeynHiggs, micrOMEGAs, SuperIso, SModelS) to scan, filter, and evaluate thousands of pMSSM parameter points against electroweak precision observables and dark matter constraints. Orchestrated via a modular [Snakemake](https://snakemake.readthedocs.io) workflow supporting local and cluster execution (SLURM / HTCondor).
+
+## 📊 Key Results & Visualizations
+
+Here are highlights from the parameter scan analysis:
+*(Note: Raw scan data and generated outputs are excluded from version control via .gitignore. Figures and tables can be reproduced locally by running the analysis notebook against compatible dataset runs).*
+
+- **Exclusion & Mass Planes:** Evaluated parameter constraints against LHC limits.
+- **Branching Ratios & Decays:** Mapped evolutionary behavior across Higgs and Z decay regimes.
+
+## 🛠️ Technical Stack & Architecture
+- **Language:** Python 3.14
+- **Core Libraries:** NumPy, Pandas, SciPy, uproot (pure-Python ROOT file I/O)
+- **Workflow & Orchestration:** Snakemake, Docker, Pixi (environment management)
+- **Execution Backends:** Local, SLURM, HTCondor (with automated EOS publishing)
+
+## Acknowledgments
+
+This project adapts workflow structures and generation frameworks from the upstream repository:
+- **Upstream Repository:** [Run3ModelGen on CERN GitLab](https://gitlab.cern.ch/jwuerzin/Run3ModelGen)
+*(The documentation below outlines the full technical specification, installation guides, and command-line reference for Run3ModelGen).*
+
+---
+
 # Run3ModelGen <!-- omit in toc -->
 
 Modern pMSSM model generation, orchestrated by a [Snakemake](https://snakemake.readthedocs.io) workflow: the same entrypoints run locally, on SLURM, or on HTCondor (`--backend`), with resumable scans and per-step re-runs. Fully independent of lxplus, fully Dockerised.
