@@ -20,6 +20,7 @@ Here are highlights from the parameter scan analysis:
 
 This project adapts workflow structures and generation frameworks from the upstream repository:
 - **Upstream Repository:** [Run3ModelGen on CERN GitLab](https://gitlab.cern.ch/jwuerzin/Run3ModelGen)
+
 *(The documentation below outlines the full technical specification, installation guides, and command-line reference for Run3ModelGen).*
 
 ---
